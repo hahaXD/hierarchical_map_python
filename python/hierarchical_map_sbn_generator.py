@@ -7,6 +7,11 @@ import itertools
 import sdd
 import sdd.models
 import sdd.util
+from optparse import OptionParser
+import os
+import random
+import subprocess, shlex
+
 def byteify(input):
     if isinstance(input, dict):
         return {byteify(key): byteify(value)
@@ -28,6 +33,50 @@ def generate_exactly_two_from_tuples(sdd_manager, tuples, variables):
                 cur_term = sdd.sdd_conjoin(cur_term, sdd.sdd_manager_literal(-cur_var, sdd_manager), sdd_manager)
         result_constraint = sdd.sdd_disjoin(cur_term, result_constraint, sdd_manager)
     return result_constraint
+
+def GenerateTrainingDataset(hm_network, sbn_spec, training_routes):
+    edge_index_map = {} # key is edge and value is index
+    cluster_index_map ={} #
+    topological_order = hm_network.TopologicalSort()
+    variables = sbn_spec["variables"]
+    for idx, variable_name in enumerate(variables):
+        index = idx + 1
+        if variable_name[0] == "e":
+            str_pair = variable_name[0].split(" ")[1][1:-1].split(",")
+            node_a, node_b = (int(str_pair[0]), int(str_pair[1]))
+            node_a, node_b = (min(node_a, node_b), max(node_a, node_b))
+            edge_index_map[(node_a, node_b)] = index
+        else:
+            assert variable_name[0] == "c"
+            cluster_name = variable_name[1:]
+            cluster_index_map[cluster_name] = index
+    data = {}
+    data["variable_size"] = len(variables)
+    root_cluster = topological_order[-1]
+    data["data"] = []
+    for route in training_routes:
+        used_index = []
+        used_nodes = set()
+        for edge in route:
+            edge_pair = (min(edge), max(edge))
+            edge_index = edge_index_map[edge_pair]
+            used_index.append(edge_index)
+            used_nodes.add(edge[0])
+            used_nodes.add(edge[1])
+        cur_cluster = root_cluster
+        while cur_cluster.children is not None:
+            involved_child_clusters = []
+            for child_name in cur_cluster.children:
+                child_cluster = cur_cluster.children[child_name]
+                if len(child_cluster.nodes.union(used_nodes)) != 0:
+                    involved_child_clusters.append(child_name)
+            if len(involved_child_clusters) == 1:
+                used_index.append(cluster_index_map[involved_child_clusters[0]])
+                cur_cluster = child_cluster
+            else:
+                break
+        data["data"].append(used_index)
+    return data
 
 def generate_sdd_from_graphset(paths, sdd_manager, zdd_edge_to_sdd_edges):
     try:
@@ -538,7 +587,7 @@ class HmNetwork(object):
         with open(dot_filename , "w") as fp:
             fp.write(dot_file_content)
 
-    def CompileToSBN(self, sbn_json, prefix):
+    def CompileToSBN(self, prefix):
         variables = []
         for cluster_name in self.clusters:
             cluster = self.clusters[cluster_name]
@@ -576,8 +625,7 @@ class HmNetwork(object):
                     cluster_spec["parents"].append(parent_cluster.name)
             cluster_spec["constraint"] = cluster.GetLocalConstraints(prefix)
             spec["clusters"].append(cluster_spec)
-        with open (sbn_json, "w") as fp:
-            json.dump(spec, fp, indent=2)
+        return sbn_json
 
 def RemoveSelfLoop (edges):
     new_edges = []
@@ -587,22 +635,47 @@ def RemoveSelfLoop (edges):
         new_edges.append(edge_tup)
     return new_edges
 
-json_filename = sys.argv[1]
-sdd_dir = sys.argv[2]
-output_json = sys.argv[3]
-with open (json_filename, "r") as fp:
-    hm_spec = json.load(fp)
-    hm_spec = byteify(hm_spec)
-hm_spec["edges"] = RemoveSelfLoop(hm_spec["edges"])
-network = HmNetwork.ReadHmSpec(hm_spec)
-"""
-cluster_leave_to_root = network.TopologicalSort()
-for cluster in cluster_leave_to_root:
-    print cluster.name
-#network.write_hierarchy_to_dot("test.dot")
-for cluster_name in network.clusters:
-    cluster = network.clusters[cluster_name]
-    print ("Cluster name : %s \n Internal Edges : %s \n External Edges : %s  \n \n \n \n" % (cluster.name, cluster.internal_edges, cluster.external_edges))
-"""
-network.write_hierarchy_to_dot("%s.dot", output_json)
-network.CompileToSBN(output_json, sdd_dir)
+if __name__ == "__main__":
+    usage = "usage: %prog [options] hierarchical_spec"
+    parser = OptionParser(usage=usage)
+    parser.add_option("-d", "--data", action="store", type="string", dest="data")
+    parser.add_option("--sdd_dir", action="store", type="string", dest="sdd_dir")
+    parser.add_option("--sbn_compiler", action="store", type="string", dest="sbn_compiler")
+    (options,args) = parser.parse_args()
+    if len(args) == 0:
+        parser.print_usage()
+        sys.exit(1)
+    data = None
+    training_data_filename = None
+    testing_data = None
+    with open (args[0], "r") as fp:
+        hm_spec = json.load(fp)
+        hm_spec = byteify(hm_spec)
+        hm_spec["edges"] = RemoveSelfLoop(hm_spec["edges"])
+    network = HmNetwork.ReadHmSpec(hm_spec)
+    if options.sdd_dir:
+        sdd_dir = options.sdd_dir
+    else:
+        sdd_dir = tempfile.gettempdir()
+    sbn_spec = network.CompileToSBN(os.path.abspath(sdd_dir)+"/")
+    if options.data:
+        data_filename = options.data
+        with open (data_filename, "r") as fp:
+            data = json.load(fp)
+        random.shuffle(data)
+        training_size = len(data)/10*9
+        training_data = data[:training_size]
+        testing_data = data[training_size:]
+        training_data_json = GenerateTrainingDataset(network, sbn_spec, training_data)
+        training_data_filename = "%s/training.json" % sdd_dir
+    psdd_filename = "%s/sbn.psdd" % sdd_dir
+    vtree_filename = "%s/sbn.vtree" % sdd_dir
+    sbn_filename = "%s/sbn.json" % sdd_dir
+    if options.sbn_compiler:
+        sbn_compiler = options.sbn_compiler
+    else:
+        sbn_compiler = "structured_bn_main"
+    cmd = "%s --psdd_filename %s --vtree_filename %s" % (sbn_compiler, psdd_filename, vtree_filename)
+    if training_data_filename:
+        cmd += " --sparsed_learning_dataset %s" % training_data_filename
+    subprocess.call(shlex.split(cmd))
