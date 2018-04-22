@@ -27,8 +27,6 @@ import com.graphhopper.util.GPXEntry as GPXEntry
 import java.lang.Exception
 from operator import itemgetter
 from simple_graph import *
-from hierarchical_map_sbn_generator import *
-import subprocess, shlex
 
 def simple_graph(graph):
     nodes,edges = {},{}
@@ -339,7 +337,7 @@ def GenerateTrainingDataset(hm, sbn_spec, training_routes):
             node_a, node_b = (min(node_a, node_b), max(node_a, node_b))
             edge_index_map[(node_a, node_b)] = index
         else:
-            assert variable_name[0] == "c":
+            assert variable_name[0] == "c"
             cluster_name = variable_name[1:]
             cluster_index_map[cluster_name] = index
     data = {}
@@ -377,13 +375,7 @@ if __name__ == '__main__':
     parser.add_option("--output_binary_hierarchy", action="store", type="string", dest="output_binary_hierarchy_filename")
     parser.add_option("-s", "--seed", action="store", type="int", dest="seed")
     parser.add_option("-l", "--leaf_bound", action="store", type="int", dest="leaf_bound")
-    parser.add_option("--gps_routes_train", action="store", type="string", dest="gps_routes_train")
-    parser.add_option("--output_training_routes", action="store", type="string", dest= "output_training_routes")
-    parser.add_option("--input_training_routes", action="store", type="string", dest="input_training_routes")
-    parser.add_option("--gps_routes_test", action="store", type="string", dest="gps_routes_test")
-    parser.add_option("--do_not_compile", action="store_true", dest = "do_not_compile")
-    parser.add_option("--sdd_dir", action="store", type="string", dest="sdd_dir")
-    parser.add_option("--sbn_compiler", action="store", type="string", dest="sbn_compiler")
+    parser.add_option("--gps_routes", action="store", nargs=2, type="string", dest="gps_routes")
     (options, args) = parser.parse_args()
     hopper = None
     graph = None
@@ -426,31 +418,11 @@ if __name__ == '__main__':
         if options.output_binary_hierarchy_filename:
             with open(options.output_binary_hierarchy_filename, "wb") as fp:
                 json.dump(binary_hierarchy, fp, indent=2)
-    training_routes = None
-    if options.input_training_routes:
-        with open(options.input_training_routes, "r") as fp:
-            training_routes = json.load(fp)
-    if options.gps_routes_train:
+    if options.gps_routes:
+        gps_routes_prefix = options.gps_routes[0]
+        used_edges_filename = options.gps_routes[1]
         if hopper == None or graph == None or encoder == None:
             raise "need osm file to train gps route"
-        training_routes = GenerateRoutesFromGps(graph, hopper, encoder, options.gps_routes_train)
-        if options.output_training_routes:
-            with open(options.output_training_routes, "wb") as fp:
-                json.dump(training_routes, fp, indent=2)
-    if options.do_not_compile:
-        return;
-    assert options.sdd_dir is not None
-    assert options.sbn_compiler is not None
-    psdd_filename = "%s/sbn.psdd" % sdd_dir
-    vtree_filename = "%s/sbn.vtree" % sdd_dir
-    sbn_filename = "%s/sbn.json" % sdd_dir
-    binary_hierarchy["edges"] = RemoveSelfLoop(binary_hierarchy["edges"])
-    network = HmNetwork.ReadHmSpec(binary_hierarchy)
-    spec = network.CompileToSBN(sdd_dir+"/")
-    assert training_routes is not None
-    training_examples = GenerateTrainingDataset(network, spec, training_routes)
-    with open (sbn_filename, "w") as fp:
-        json.dump(spec, fp)
-    cmd = "%s --psdd_filename %s --vtree_filename %s %s" % (options.sbn_compiler, psdd_filename, vtree_filename, sbn_filename)
-    subprocess.call(shlex.split(cmd))
-
+        used_edges = GenerateRoutesFromGps(graph, hopper, encoder, gps_routes_prefix)
+        with open(used_edges_filename, "wb") as fp:
+            json.dump(used_edges, fp, indent=2)

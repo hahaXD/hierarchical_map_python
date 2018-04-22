@@ -6,7 +6,6 @@ bottom = 34.015020
 right = -118.404472 
 top = 34.077037 
 
-url  = "http://overpass-api.de/api/map?bbox={},{},{},{}".format(left, bottom, right, top)
 parser = OptionParser()
 parser.add_option("-o", "--osm", action="store", type="string", dest="filename")
 parser.add_option("-l", "--left", action="store", type="float", dest="left")
@@ -22,6 +21,7 @@ if options.bottom:
     bottom = options.bottom
 if options.top:
     top = options.top
+url  = "http://overpass-api.de/api/map?bbox={},{},{},{}".format(left, bottom, right, top)
 response = requests.get(url)
 filename = options.filename
 if(response.status_code == 400):
