@@ -42,7 +42,7 @@ def GenerateTrainingDataset(hm_network, sbn_spec, training_routes):
     for idx, variable_name in enumerate(variables):
         index = idx + 1
         if variable_name[0] == "e":
-            str_pair = variable_name[0].split(" ")[1][1:-1].split(",")
+            str_pair = variable_name.split(" ")[1][1:-1].split(",")
             node_a, node_b = (int(str_pair[0]), int(str_pair[1]))
             node_a, node_b = (min(node_a, node_b), max(node_a, node_b))
             edge_index_map[(node_a, node_b)] = index
@@ -625,7 +625,7 @@ class HmNetwork(object):
                     cluster_spec["parents"].append(parent_cluster.name)
             cluster_spec["constraint"] = cluster.GetLocalConstraints(prefix)
             spec["clusters"].append(cluster_spec)
-        return sbn_json
+        return spec
 
 def RemoveSelfLoop (edges):
     new_edges = []
@@ -641,6 +641,7 @@ if __name__ == "__main__":
     parser.add_option("-d", "--data", action="store", type="string", dest="data")
     parser.add_option("--sdd_dir", action="store", type="string", dest="sdd_dir")
     parser.add_option("--sbn_compiler", action="store", type="string", dest="sbn_compiler")
+    parser.add_option("--sbn_spec", action="store", type="string", dest="sbn_spec")
     (options,args) = parser.parse_args()
     if len(args) == 0:
         parser.print_usage()
@@ -657,7 +658,14 @@ if __name__ == "__main__":
         sdd_dir = options.sdd_dir
     else:
         sdd_dir = tempfile.gettempdir()
-    sbn_spec = network.CompileToSBN(os.path.abspath(sdd_dir)+"/")
+    if options.sbn_spec:
+        with open(options.sbn_spec, "r") as fp:
+            sbn_spec = json.load(fp)
+    else:
+        sbn_spec = network.CompileToSBN(os.path.abspath(sdd_dir)+"/")
+    sbn_filename = "%s/sbn.json" % sdd_dir
+    with open (sbn_filename, "w") as fp:
+        json.dump(sbn_spec, fp, indent=2)
     if options.data:
         data_filename = options.data
         with open (data_filename, "r") as fp:
@@ -668,14 +676,17 @@ if __name__ == "__main__":
         testing_data = data[training_size:]
         training_data_json = GenerateTrainingDataset(network, sbn_spec, training_data)
         training_data_filename = "%s/training.json" % sdd_dir
+        with open(training_data_filename, "w") as fp:
+            json.dump(training_data_json, fp)
     psdd_filename = "%s/sbn.psdd" % sdd_dir
     vtree_filename = "%s/sbn.vtree" % sdd_dir
-    sbn_filename = "%s/sbn.json" % sdd_dir
     if options.sbn_compiler:
         sbn_compiler = options.sbn_compiler
     else:
         sbn_compiler = "structured_bn_main"
     cmd = "%s --psdd_filename %s --vtree_filename %s" % (sbn_compiler, psdd_filename, vtree_filename)
     if training_data_filename:
-        cmd += " --sparsed_learning_dataset %s" % training_data_filename
+        cmd += " --sparse_learning_dataset %s" % training_data_filename
+    cmd += " %s" % sbn_filename
+    print cmd
     subprocess.call(shlex.split(cmd))

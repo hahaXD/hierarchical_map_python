@@ -1,0 +1,9 @@
+*.dSYM
+*.o
+*.gcno
+*.gcda
+*.osm
+*.pyc
+*.vtree
+*.sdd
+
