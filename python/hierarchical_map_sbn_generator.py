@@ -34,6 +34,18 @@ def generate_exactly_two_from_tuples(sdd_manager, tuples, variables):
         result_constraint = sdd.sdd_disjoin(cur_term, result_constraint, sdd_manager)
     return result_constraint
 
+def EdgeToIndex(sbn_spec):
+    edge_index_map = {} # key is edge and value is index
+    variables = sbn_spec["variables"]
+    for idx, variable_name in enumerate(variables):
+        index = idx + 1
+        if variable_name[0] == "e":
+            str_pair = variable_name.split(" ")[1][1:-1].split(",")
+            node_a, node_b = (int(str_pair[0]), int(str_pair[1]))
+            node_a, node_b = (min(node_a, node_b), max(node_a, node_b))
+            edge_index_map[(node_a, node_b)] = index
+    return edge_index_map
+
 def GenerateTrainingDataset(hm_network, sbn_spec, training_routes):
     edge_index_map = {} # key is edge and value is index
     cluster_index_map ={} #
@@ -635,6 +647,89 @@ def RemoveSelfLoop (edges):
         new_edges.append(edge_tup)
     return new_edges
 
+def construct_cnf(src_edges, dst_edges, evid_edges, output_filename, edge_to_index, variable_size):
+    cnf = []
+    src_indexes = []
+    for src_edge in src_edges:
+        tup = (min(src_edge), max(src_edge))
+        src_indexes.append(edge_to_index[tup])
+    dst_indexes = []
+    for dst_edge in dst_edges:
+        tup = (min(dst_edge), max(dst_edge))
+        dst_indexes.append(edge_to_index[tup])
+    cnf.append(list(src_indexes))
+    for pair in itertools.combinations(src_indexes,2):
+        cnf.append([-a for a in pair])
+    cnf.append(list(dst_indexes))
+    for pair in itertools.combinations(dst_indexes,2):
+        cnf.append([-a for a in pair])
+    evid_edge_indexes=[]
+    for evid_edge in evid_edges:
+        tup = (min(evid_edge), max(evid_edge))
+        cnf.append(edge_to_index[tup])
+    with open (output_filename, "w") as fp:
+        fp.write("p cnf %s %s\n"%(variable_size, len(cnf)))
+        for clause in cnf:
+            fp.write("%s %s 0\n" % (len(clause), " ".join(clause)))
+
+def TestSingleRoute(test_route, edge_to_index, node_to_edges, sdd_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size):
+    src_node = None
+    dst_node = None
+    if len(test_route) == 1:
+        src_node = len(test_route[0][0])
+        dst_node = len(test_route[0][1])
+    else:
+        if test_route[0][0] in test_route[1]:
+            src_node = test_route[0][1]
+        else:
+            src_node = test_route[0][0]
+        if test_route[-1][0] in test_route[-2]:
+            dst_node = test_route[-1][1]
+        else:
+            dst_node = test_route[-1][0]
+    src_edges = node_to_edges[src_node]
+    dst_edges = node_to_edges[dst_node]
+    evid = []
+    cnf_filename = "%s/evid.cnf" % sdd_filename_prefix
+    num_predictions = 0
+    correct_predictions = 0
+    for idx, cur_edge in enumerate(test_route):
+        num_predictions += 1
+        construct_cnf(src_edges, dst_edges, evid, cnf_filename, edge_to_index, variable_sizse)
+        cmd = "%s --mar_query --cnf_evid %s %s %s" % (inference_binary, cnf_filename, learned_psdd_filename, learned_vtree_filename)
+        output = subprocess.check_output(shlex.split(cmd))
+        lines = output.split("\n")
+        results = None
+        for line in lines:
+            if line.find("MAR result") != -1:
+                raw_results = line.strip().split("=")[1].split(",")
+                for tok in raw_results:
+                    var_index = int(tok.split(":")[0])
+                    neg_logpr = float(tok.split(":")[1].split("|")[0])
+                    pos_logpr = float(tok.split(":")[1].split("|")[1])
+                    results[var_index] = (neg_logpr, pos_logpr)
+        assert results is not None
+        if idx == 0:
+            candidates = [edge_to_index[(min(a), max(a))] for a in src_edges]
+        else:
+            neighboring_edges = []
+            if cur_edge[0] in test_route[idx-1]:
+                neighboring_edges = node_to_edges[cur_edge[0]]
+            else:
+                neighboring_edges = node_to_edges[cur_edge[1]]
+            neighboring_edges = [(min(a), max(a)) for a in neighboring_edges]
+            neigbhoring_edges.remove((min(test_route[idx-1]), max(test_route[idx-1])))
+            candidates = [edge_to_index[e] for e in neighboring_edges]
+        pred = candidates[0]
+        pred_val = results[pred][1]
+        for i in range(1, len(candidates)):
+            if results[candidates[i]][1] > pred_val:
+                pred = candidates[i]
+                pred_val = results[pred][1]
+        if edge_to_index[(min(cur_edge), max(cur_edge))] == pred:
+            correct_predictions += 1
+    return correct_predictions, num_predictions
+
 if __name__ == "__main__":
     usage = "usage: %prog [options] hierarchical_spec"
     parser = OptionParser(usage=usage)
@@ -642,6 +737,7 @@ if __name__ == "__main__":
     parser.add_option("--sdd_dir", action="store", type="string", dest="sdd_dir")
     parser.add_option("--sbn_compiler", action="store", type="string", dest="sbn_compiler")
     parser.add_option("--sbn_spec", action="store", type="string", dest="sbn_spec")
+    parser.add_option("--psdd_inference", action="store", type="string", dest="psdd_inference")
     (options,args) = parser.parse_args()
     if len(args) == 0:
         parser.print_usage()
@@ -690,3 +786,12 @@ if __name__ == "__main__":
     cmd += " %s" % sbn_filename
     print cmd
     subprocess.call(shlex.split(cmd))
+    edge_to_indexes = EdgeToIndex(sbn_spec)
+    node_to_edges = {}
+    assert options.psdd_inference is not None
+    for tup in edge_to_indexes:
+        node_to_edges.setdefault(tup[0], []).append(tup)
+        node_to_edges.setdefault(tup[1], []).append(tup)
+    if testing_data:
+        for test_route in testing_data:
+            print TestSingleRoute(test_route, edge_to_indexes, node_to_edges, sdd_dir, options.psdd_inference, psdd_filename, vtree_filename, len(sbn_spec["variables"]))

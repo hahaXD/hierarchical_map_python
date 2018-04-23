@@ -324,50 +324,6 @@ def GenerateRoutesFromGps(graph, hopper, encoder, gps_filenames):
     clean_matches = cleaner.clean_matches(saved_matches)
     return clean_matches
 
-def GenerateTrainingDataset(hm, sbn_spec, training_routes):
-    edge_index_map = {} # key is edge and value is index
-    cluster_index_map ={} #
-    topological_order = hm.TopologicalSort()
-    variables = sbn_spec["variables"]
-    for idx, variable_name in enumerate(variables):
-        index = idx + 1
-        if variable_name[0] == "e":
-            str_pair = variable_name[0].split(" ")[1][1:-1].split(",")
-            node_a, node_b = (int(str_pair[0]), int(str_pair[1]))
-            node_a, node_b = (min(node_a, node_b), max(node_a, node_b))
-            edge_index_map[(node_a, node_b)] = index
-        else:
-            assert variable_name[0] == "c"
-            cluster_name = variable_name[1:]
-            cluster_index_map[cluster_name] = index
-    data = {}
-    data["variable_size"] = len(variables)
-    root_cluster = topological_order[-1]
-    data["data"] = []
-    for route in training_routes:
-        used_index = []
-        used_nodes = set()
-        for edge in route:
-            edge_pair = (min(edge), max(edge))
-            edge_index = edge_index_map[edge_pair]
-            used_index.append(edge_index)
-            used_nodes.add(edge[0])
-            used_nodes.add(edge[1])
-        cur_cluster = root_cluster
-        while cur_cluster.children is not None:
-            involved_child_clusters = []
-            for child_name in cur_cluster.children:
-                child_cluster = cur_cluster.children[child_name]
-                if len(child_cluster.nodes.union(used_nodes)) != 0:
-                    involved_child_clusters.append(child_name)
-            if len(involved_child_clusters) == 1:
-                used_index.append(cluster_index_map[involved_child_clusters[0]])
-                cur_cluster = child_cluster
-            else:
-                break
-        data["data"].append(used_index)
-    return data
-
 if __name__ == '__main__':
     parser = OptionParser()
     parser.add_option("-d", "--temp_directory", action="store", type="string", dest="temp_directory")
