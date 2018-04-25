@@ -13,7 +13,7 @@ import random
 import subprocess, shlex
 import math
 import string
-from plot_mar_prediction import *
+from plot_prediction import *
 import logging
 
 def byteify(input):
@@ -700,6 +700,70 @@ def construct_cnf(src_edge_indexes, dst_edge_indexes, evid_edge_indexes, output_
         for clause in cnf:
             fp.write("%s 0\n" % (" ".join([str(a) for a in clause])))
 
+def ParseMpeOutput(output):
+    lines = output.split("\n")
+    results = None
+    for line in lines:
+        line = line.strip()
+        if line.find("MPE result") != -1:
+            results = set()
+            raw_result = line,split("=")[1].split(",")
+            for tok in raw_result:
+                if tok.strip() == "":
+                    continue
+                var_index = int(tok.split(":")[0])
+                value = int(tok.split(":")[1])
+                if value > 0:
+                    results.add(var_index)
+    return results
+
+def RoutePredictionPerRoute(test_route, node_to_edge_indexes, pair_to_index, sdd_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size, step_by_step, node_locations):
+    logger = logging.getLogger()
+    sequence_route = sequence_path(test_route)
+    used_edge_indexes = []
+    index_to_tuples = {}
+    for pair in pair_to_index:
+        index_to_tuples[pair_to_index[pair]] = pair
+    for i in range(1, len(sequence_route)):
+        node_a = sequence_route[i-1]
+        node_b = sequence_route[i]
+        cur_edge_pair = (min(node_a, node_b), max(node_a, node_b))
+        used_edge_indexes.append(pair_to_index[cur_edge_pair])
+    logger.info("Testing route with node sequence : %s, indexes of used edges : %s" % (sequence_route, used_edge_indexes))
+    src_node = sequence_route[0]
+    dst_node = sequence_route[-1]
+    if not step_by_step:
+        cnf_filename = "%s_src_and_dst_evid.cnf" % (sdd_filename_prefix)
+        construct_cnf(node_to_edge_indexes[src_node], node_to_edge_indexes[dst_node], [], cnf_filename, variable_size)
+        cmd = "%s --mpe_query --cnf_evid %s %s %s" % (inference_binary, cnf_filename, learned_psdd_filename, learned_vtree_filename)
+        logger.debug("Running command : %s" % cmd)
+        output = subprocess.check_output(shlex.split(cmd))
+        mpe_result = ParseMpeOutput(output)
+        plot_filename = "%s_src_and_dst.png" % sdd_filename_prefix
+        plot_mpe_prediction(index_to_tuples, node_locations, mpe_result, [], used_edge_indexes, src_node, dst_node, plot_filename)
+    else:
+        edges_evid = []
+        mpe_result = None
+        for i in range(0, len(sequence_route)-1):
+            succeed = False
+            attempt_index = 0
+            while not succeed:
+                cnf_filename = "%s_%s_%s_evid.cnf" % (sdd_filename_prefix, i, attempt_index)
+                construct_cnf(node_to_edge_indexes[src_node], node_to_edge_indexes[dst_node], edges_evid, cnf_filename, variable_size)
+                cmd = "%s --mpe_query --cnf_evid %s %s %s" % (inference_binary, cnf_filename, learned_psdd_filename, learned_vtree_filename)
+                logger.debug("Running command : %s" % cmd)
+                output = subprocess.check_output(shlex.split(cmd))
+                mpe_result = ParseMpeOutput(output)
+                if mpe_result is None:
+                    continue
+                else:
+                    succeed = True
+                    break
+        assert mpe_result is not None
+        plot_filename = "%s_%s.png" % (sdd_filename_prefix, i)
+        plot_mpe_prediction(index_to_tuples, node_locations, mpe_result, edges_evid, used_edge_indexes, src_node, dst_node, plot_filename)
+
+
 def TestSingleRoute(test_route, node_to_edge_indexes, pair_to_index, sdd_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size):
     logger = logging.getLogger()
     sequence_route = sequence_path(test_route)
@@ -781,6 +845,9 @@ if __name__ == "__main__":
     parser.add_option("--psdd_inference", action="store", type="string", dest="psdd_inference")
     parser.add_option("--compiled_sbn", action="store", nargs=2, type="string", dest="compiled_sbn")
     parser.add_option("--test_size", action="store", type="string", dest="test_size")
+    parser.add_option("--mpe_test", action="store_true", dest="mpe_test")
+    parser.add_option("--mar_test", action="store_true", dest="mar_test")
+    parser.add_option("--mpe_step", action="store_true", dest="mpe_step")
     (options,args) = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger()
@@ -851,7 +918,7 @@ if __name__ == "__main__":
         vtree_filename = "%s/sbn.vtree" % sdd_dir
         if options.sbn_compiler:
             sbn_compiler = options.sbn_compiler
-        else:  
+        else:
             sbn_compiler = "structured_bn_main"
         cmd = "%s --psdd_filename %s --vtree_filename %s" % (sbn_compiler, psdd_filename, vtree_filename)
         if training_data_filename:
@@ -873,7 +940,7 @@ if __name__ == "__main__":
     for tup in edge_to_indexes:
         node_to_edges.setdefault(tup[0], []).append(edge_to_indexes[tup])
         node_to_edges.setdefault(tup[1], []).append(edge_to_indexes[tup])
-    if testing_routes is not None:
+    if testing_routes is not None and options.mar_test:
         total_prediction = 0
         total_accurate = 0
         for idx, test_route in enumerate(testing_routes):
@@ -881,4 +948,9 @@ if __name__ == "__main__":
             total_prediction += cur_pred
             total_accurate += cur_accurate
         print "Accurate prediction: %s, Total prediction: %s, Accuracy: %s" % (total_accurate, total_prediction, float(total_accurate)/total_prediction)
-
+    if testing_routes is not None and options.mpe_test:
+        for idx, test_route = enumerate(testing_routes):
+            step_by_step = False
+            if options.mpe_step:
+                step_by_step = True
+            RoutePredictionPerRoute(test_rotue, node_to_edges, edge_to_indexes, "%s/%s" % (sdd_dir, idx), inference_binary, psdd_filename, vtree_filename, len(sbn_spec["variables"]), step_by_step, hm_spec["nodes_location"])
