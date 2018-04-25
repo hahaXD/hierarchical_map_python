@@ -840,10 +840,12 @@ if __name__ == "__main__":
             json.dump(training_routes, fp)
         with open(testing_routes_filename, "w") as fp:
             json.dump(testing_routes, fp)
-    training_data_json = GenerateTrainingDataset(network, sbn_spec, training_routes)
-    training_data_filename = "%s/training_data.json" % sdd_dir
-    with open(training_data_filename, "w") as fp:
-        json.dump(training_data_json, fp)
+    training_data_filename = None
+    if training_routes is not None:
+        training_data_json = GenerateTrainingDataset(network, sbn_spec, training_routes)
+        training_data_filename = "%s/training_data.json" % sdd_dir
+        with open(training_data_filename, "w") as fp:
+            json.dump(training_data_json, fp)
     if not options.compiled_sbn:
         psdd_filename = "%s/sbn.psdd" % sdd_dir
         vtree_filename = "%s/sbn.vtree" % sdd_dir
@@ -863,15 +865,20 @@ if __name__ == "__main__":
         logger.info("Load compiled psdd with filenames %s %s" % (psdd_filename, vtree_filename))
     edge_to_indexes = EdgeToIndex(sbn_spec)
     node_to_edges = {}
-    assert options.psdd_inference is not None
+    inference_binary = None
+    if options.psdd_inference is None:
+        inference_binary = "psdd_inference_main"
+    else:
+        inference_binary = options.psdd_inference
     for tup in edge_to_indexes:
         node_to_edges.setdefault(tup[0], []).append(edge_to_indexes[tup])
         node_to_edges.setdefault(tup[1], []).append(edge_to_indexes[tup])
-    total_prediction = 0
-    total_accurate = 0
-    for idx, test_route in enumerate(testing_routes):
-        cur_accurate, cur_pred = TestSingleRoute(test_route, node_to_edges, edge_to_indexes, "%s/%s" %(sdd_dir,idx), options.psdd_inference, psdd_filename, vtree_filename, len(sbn_spec["variables"]))
-        total_prediction += cur_pred
-        total_accurate += cur_accurate
-    print "Accurate prediction: %s, Total prediction: %s, Accuracy: %s" % (total_accurate, total_prediction, float(total_accurate)/total_prediction)
+    if testing_routes is not None:
+        total_prediction = 0
+        total_accurate = 0
+        for idx, test_route in enumerate(testing_routes):
+            cur_accurate, cur_pred = TestSingleRoute(test_route, node_to_edges, edge_to_indexes, "%s/%s" %(sdd_dir,idx), inference_binary, psdd_filename, vtree_filename, len(sbn_spec["variables"]))
+            total_prediction += cur_pred
+            total_accurate += cur_accurate
+        print "Accurate prediction: %s, Total prediction: %s, Accuracy: %s" % (total_accurate, total_prediction, float(total_accurate)/total_prediction)
 
