@@ -11,6 +11,10 @@ from optparse import OptionParser
 import os
 import random
 import subprocess, shlex
+import math
+import string
+from plot_mar_prediction import *
+import logging
 
 def byteify(input):
     if isinstance(input, dict):
@@ -22,6 +26,40 @@ def byteify(input):
         return input.encode('utf-8')
     else:
         return input
+def other_end(edge_tup, orig):
+    if edge_tup[0] == orig:
+        return edge_tup[1]
+    else:
+        return edge_tup[0]
+
+def sequence_path (path):
+    if len(path) == 1:
+        return list(path)
+    result = []
+    node_to_edge = {}
+    for edge in path:
+        node_to_edge.setdefault(edge[0],[]).append(edge)
+        node_to_edge.setdefault(edge[1],[]).append(edge)
+    starting_edge = []
+    end_nodes = []
+    for node in node_to_edge:
+        if len(node_to_edge[node]) == 1:
+            starting_edge.append(node_to_edge[node][0])
+            end_nodes.append(node)
+    assert len(starting_edge) == 2
+    result.append(end_nodes[0])
+    cur_node = other_end(starting_edge[0], end_nodes[0])
+    result.append(cur_node)
+    while cur_node != end_nodes[1]:
+        edges = node_to_edge[cur_node]
+        if result[-2] in edges[0]:
+            cur_node = other_end(edges[1], cur_node)
+        else:
+            assert result[-2] in edges[1]
+            cur_node = other_end(edges[0], cur_node)
+        result.append(cur_node)
+    return result
+
 def generate_exactly_two_from_tuples(sdd_manager, tuples, variables):
     result_constraint = sdd.sdd_manager_false(sdd_manager)
     for cur_tup in tuples:
@@ -619,7 +657,8 @@ class HmNetwork(object):
         spec["variables"] = variables
         spec["clusters"] = []
         for cluster_name in self.clusters:
-            print "Processing Cluster %s " % cluster_name
+            logger = logging.getLogger()
+            logger.info("Processing Cluster %s " % cluster_name)
             cluster = self.clusters[cluster_name]
             cluster_spec = {}
             cluster_spec["cluster_name"] = cluster.name
@@ -646,105 +685,124 @@ def RemoveSelfLoop (edges):
             continue
         new_edges.append(edge_tup)
     return new_edges
-
-def construct_cnf(src_edges, dst_edges, evid_edges, output_filename, edge_to_index, variable_size):
+def construct_cnf(src_edge_indexes, dst_edge_indexes, evid_edge_indexes, output_filename, variable_size):
     cnf = []
-    src_indexes = []
-    for src_edge in src_edges:
-        tup = (min(src_edge), max(src_edge))
-        src_indexes.append(edge_to_index[tup])
-    dst_indexes = []
-    for dst_edge in dst_edges:
-        tup = (min(dst_edge), max(dst_edge))
-        dst_indexes.append(edge_to_index[tup])
-    cnf.append(list(src_indexes))
-    for pair in itertools.combinations(src_indexes,2):
-        cnf.append([-a for a in pair])
-    cnf.append(list(dst_indexes))
-    for pair in itertools.combinations(dst_indexes,2):
-        cnf.append([-a for a in pair])
-    evid_edge_indexes=[]
-    for evid_edge in evid_edges:
-        tup = (min(evid_edge), max(evid_edge))
-        cnf.append(edge_to_index[tup])
+    cnf.append(list(src_edge_indexes))
+    for i,j in itertools.combinations(src_edge_indexes,2):
+        cnf.append([-i, -j])
+    cnf.append(list(dst_edge_indexes))
+    for i,j in itertools.combinations(dst_edge_indexes,2):
+        cnf.append([-i, -j])
+    for evid in evid_edge_indexes:
+        cnf.append([evid])
     with open (output_filename, "w") as fp:
         fp.write("p cnf %s %s\n"%(variable_size, len(cnf)))
         for clause in cnf:
-            fp.write("%s %s 0\n" % (len(clause), " ".join(clause)))
+            fp.write("%s 0\n" % (" ".join([str(a) for a in clause])))
 
-def TestSingleRoute(test_route, edge_to_index, node_to_edges, sdd_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size):
-    src_node = None
-    dst_node = None
-    if len(test_route) == 1:
-        src_node = len(test_route[0][0])
-        dst_node = len(test_route[0][1])
-    else:
-        if test_route[0][0] in test_route[1]:
-            src_node = test_route[0][1]
-        else:
-            src_node = test_route[0][0]
-        if test_route[-1][0] in test_route[-2]:
-            dst_node = test_route[-1][1]
-        else:
-            dst_node = test_route[-1][0]
-    src_edges = node_to_edges[src_node]
-    dst_edges = node_to_edges[dst_node]
-    evid = []
-    cnf_filename = "%s/evid.cnf" % sdd_filename_prefix
-    num_predictions = 0
-    correct_predictions = 0
-    for idx, cur_edge in enumerate(test_route):
-        num_predictions += 1
-        construct_cnf(src_edges, dst_edges, evid, cnf_filename, edge_to_index, variable_sizse)
-        cmd = "%s --mar_query --cnf_evid %s %s %s" % (inference_binary, cnf_filename, learned_psdd_filename, learned_vtree_filename)
-        output = subprocess.check_output(shlex.split(cmd))
-        lines = output.split("\n")
-        results = None
-        for line in lines:
-            if line.find("MAR result") != -1:
-                raw_results = line.strip().split("=")[1].split(",")
-                for tok in raw_results:
-                    var_index = int(tok.split(":")[0])
-                    neg_logpr = float(tok.split(":")[1].split("|")[0])
-                    pos_logpr = float(tok.split(":")[1].split("|")[1])
-                    results[var_index] = (neg_logpr, pos_logpr)
+def TestSingleRoute(test_route, node_to_edge_indexes, pair_to_index, sdd_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size):
+    logger = logging.getLogger()
+    sequence_route = sequence_path(test_route)
+    used_edge_indexes = []
+    for i in range(1, len(sequence_route)):
+        node_a = sequence_route[i-1]
+        node_b = sequence_route[i]
+        cur_edge_pair = (min(node_a, node_b), max(node_a, node_b))
+        used_edge_indexes.append(pair_to_index[cur_edge_pair])
+    logger.info("Testing route with node sequence : %s, indexes of used edges : %s" % (sequence_route, used_edge_indexes))
+    src_node = sequence_route[0]
+    dst_node = sequence_route[-1]
+    edges_index = []
+    accurate = 0
+    total_pred = 0
+    for i in range(1, len(sequence_route)):
+        succeed = False
+        attempt_index = 0
+        while not succeed:
+            cnf_filename = "%s_%s_%s_evid.cnf" % (sdd_filename_prefix,i, attempt_index)
+            construct_cnf(node_to_edge_indexes[src_node], node_to_edge_indexes[dst_node], edges_index, cnf_filename, variable_size)
+            cmd = "%s --mar_query --cnf_evid %s %s %s" % (inference_binary, cnf_filename, learned_psdd_filename, learned_vtree_filename)
+            logger.debug("Running command : %s" % cmd)
+            output = subprocess.check_output(shlex.split(cmd))
+            lines = output.split("\n")
+            results = None
+            for line in lines:
+                if line.find("MAR result") != -1:
+                    results = {}
+                    raw_results = line.strip().split("=")[1].split(",")
+                    for tok in raw_results:
+                        if tok.strip() == "":
+                            continue
+                        var_index = int(tok.split(":")[0])
+                        neg_logpr = float(tok.split(":")[1].split("|")[0])
+                        pos_logpr = float(tok.split(":")[1].split("|")[1])
+                        results[var_index] = (neg_logpr, pos_logpr)
+                    logger.debug("Succeed in making prediction with evidence %s" % edges_index)
+                    succeed = True
+                if line.find("UNSATISFIED") != -1:
+                    logger.debug("Evidence %s does not satisfy hierarchical simple constraint" % edges_index)
+                    assert len(edges_index) > 0
+                    edges_index = edges_index[1:]
+            attempt_index += 1;
+        node_a = sequence_route[i-1]
+        node_b = sequence_route[i]
+        cur_edge_pair = (min(node_a, node_b), max(node_a, node_b))
         assert results is not None
-        if idx == 0:
-            candidates = [edge_to_index[(min(a), max(a))] for a in src_edges]
+        if i == 1:
+            candidate = list(node_to_edge_indexes[node_a])
         else:
-            neighboring_edges = []
-            if cur_edge[0] in test_route[idx-1]:
-                neighboring_edges = node_to_edges[cur_edge[0]]
-            else:
-                neighboring_edges = node_to_edges[cur_edge[1]]
-            neighboring_edges = [(min(a), max(a)) for a in neighboring_edges]
-            neigbhoring_edges.remove((min(test_route[idx-1]), max(test_route[idx-1])))
-            candidates = [edge_to_index[e] for e in neighboring_edges]
-        pred = candidates[0]
-        pred_val = results[pred][1]
-        for i in range(1, len(candidates)):
-            if results[candidates[i]][1] > pred_val:
-                pred = candidates[i]
-                pred_val = results[pred][1]
-        if edge_to_index[(min(cur_edge), max(cur_edge))] == pred:
-            correct_predictions += 1
-    return correct_predictions, num_predictions
+            candidate = list(node_to_edge_indexes[node_a])
+            if len(edges_index) > 0:
+                candidate.remove(edges_index[-1])
+        edges_index.append(pair_to_index[cur_edge_pair])
+        candidate_weights = [results[i][1] for i in candidate]
+        if abs(sum([math.exp(i) for i in candidate_weights]) - 1)  >= 0.1:
+            logger.warning("Next route candidates' marginal added up to %s, which does not equal to 1" % sum([math.exp(i) for i in candidate_weights])) 
+        max_candidate_index = candidate_weights.index(max(candidate_weights))
+        pred = candidate[max_candidate_index]
+        if pred == edges_index[-1]:
+            accurate += 1
+        candidate_weight_map = {}
+        for idx, candidate_edge in enumerate(candidate):
+            candidate_weight_map[candidate_edge] = math.exp(candidate_weights[idx])
+        logging.info("Candidate distribution : %s. Prediction edge : %s. Actual used edge : %s." % (candidate_weight_map, pred, edges_index[-1])) 
+        total_pred +=1
+    return accurate, total_pred
 
 if __name__ == "__main__":
     usage = "usage: %prog [options] hierarchical_spec"
     parser = OptionParser(usage=usage)
     parser.add_option("-d", "--data", action="store", type="string", dest="data")
+    parser.add_option("--train_test_split", action="store", type="string", nargs=2, dest="train_test_split")
+    parser.add_option("-s", "--seed", action="store", type="string", dest="seed")
     parser.add_option("--sdd_dir", action="store", type="string", dest="sdd_dir")
     parser.add_option("--sbn_compiler", action="store", type="string", dest="sbn_compiler")
     parser.add_option("--sbn_spec", action="store", type="string", dest="sbn_spec")
     parser.add_option("--psdd_inference", action="store", type="string", dest="psdd_inference")
+    parser.add_option("--compiled_sbn", action="store", nargs=2, type="string", dest="compiled_sbn")
+    parser.add_option("--test_size", action="store", type="string", dest="test_size")
     (options,args) = parser.parse_args()
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger()
     if len(args) == 0:
         parser.print_usage()
         sys.exit(1)
     data = None
-    training_data_filename = None
-    testing_data = None
+    training_routes = None
+    testing_routes = None
+    if options.train_test_split:
+        assert options.data is None
+        train_filename = options.train_test_split[0]
+        test_filename = options.train_test_split[1]
+        with open (train_filename, "r") as fp:
+            training_routes = json.load(fp)
+        with open (test_filename, "r") as fp:
+            testing_routes = json.load(fp)
+    test_size = None
+    if options.test_size:
+        test_size = int(options.test_size)
+    if options.seed:
+        random.seed(int(options.seed))
     with open (args[0], "r") as fp:
         hm_spec = json.load(fp)
         hm_spec = byteify(hm_spec)
@@ -763,35 +821,57 @@ if __name__ == "__main__":
     with open (sbn_filename, "w") as fp:
         json.dump(sbn_spec, fp, indent=2)
     if options.data:
+        logger.info("Loading data %s" % options.data)
+        assert training_routes is None
+        assert testing_routes is None
         data_filename = options.data
         with open (data_filename, "r") as fp:
             data = json.load(fp)
         random.shuffle(data)
         training_size = len(data)/10*9
-        training_data = data[:training_size]
-        testing_data = data[training_size:]
-        training_data_json = GenerateTrainingDataset(network, sbn_spec, training_data)
-        training_data_filename = "%s/training.json" % sdd_dir
-        with open(training_data_filename, "w") as fp:
-            json.dump(training_data_json, fp)
-    psdd_filename = "%s/sbn.psdd" % sdd_dir
-    vtree_filename = "%s/sbn.vtree" % sdd_dir
-    if options.sbn_compiler:
-        sbn_compiler = options.sbn_compiler
+        training_routes = data[:training_size]
+        if test_size:
+            testing_routes = data[training_size:training_size + test_size]
+        else:
+            testing_routes = data[training_size:]
+        training_routes_filename = "%s/training.json" % sdd_dir
+        testing_routes_filename = "%s/testing.json" % sdd_dir
+        with open(training_routes_filename, "w") as fp:
+            json.dump(training_routes, fp)
+        with open(testing_routes_filename, "w") as fp:
+            json.dump(testing_routes, fp)
+    training_data_json = GenerateTrainingDataset(network, sbn_spec, training_routes)
+    training_data_filename = "%s/training_data.json" % sdd_dir
+    with open(training_data_filename, "w") as fp:
+        json.dump(training_data_json, fp)
+    if not options.compiled_sbn:
+        psdd_filename = "%s/sbn.psdd" % sdd_dir
+        vtree_filename = "%s/sbn.vtree" % sdd_dir
+        if options.sbn_compiler:
+            sbn_compiler = options.sbn_compiler
+        else:  
+            sbn_compiler = "structured_bn_main"
+        cmd = "%s --psdd_filename %s --vtree_filename %s" % (sbn_compiler, psdd_filename, vtree_filename)
+        if training_data_filename:
+            cmd += " --sparse_learning_dataset %s" % training_data_filename
+        cmd += " %s" % sbn_filename
+        logger.info("Compiling sbn with commond : %s" % cmd)
+        subprocess.call(shlex.split(cmd))
     else:
-        sbn_compiler = "structured_bn_main"
-    cmd = "%s --psdd_filename %s --vtree_filename %s" % (sbn_compiler, psdd_filename, vtree_filename)
-    if training_data_filename:
-        cmd += " --sparse_learning_dataset %s" % training_data_filename
-    cmd += " %s" % sbn_filename
-    print cmd
-    subprocess.call(shlex.split(cmd))
+        psdd_filename = options.compiled_sbn[0]
+        vtree_filename = options.compiled_sbn[1]
+        logger.info("Load compiled psdd with filenames %s %s" % (psdd_filename, vtree_filename))
     edge_to_indexes = EdgeToIndex(sbn_spec)
     node_to_edges = {}
     assert options.psdd_inference is not None
     for tup in edge_to_indexes:
-        node_to_edges.setdefault(tup[0], []).append(tup)
-        node_to_edges.setdefault(tup[1], []).append(tup)
-    if testing_data:
-        for test_route in testing_data:
-            print TestSingleRoute(test_route, edge_to_indexes, node_to_edges, sdd_dir, options.psdd_inference, psdd_filename, vtree_filename, len(sbn_spec["variables"]))
+        node_to_edges.setdefault(tup[0], []).append(edge_to_indexes[tup])
+        node_to_edges.setdefault(tup[1], []).append(edge_to_indexes[tup])
+    total_prediction = 0
+    total_accurate = 0
+    for idx, test_route in enumerate(testing_routes):
+        cur_accurate, cur_pred = TestSingleRoute(test_route, node_to_edges, edge_to_indexes, "%s/%s" %(sdd_dir,idx), options.psdd_inference, psdd_filename, vtree_filename, len(sbn_spec["variables"]))
+        total_prediction += cur_pred
+        total_accurate += cur_accurate
+    print "Accurate prediction: %s, Total prediction: %s, Accuracy: %s" % (total_accurate, total_prediction, float(total_accurate)/total_prediction)
+

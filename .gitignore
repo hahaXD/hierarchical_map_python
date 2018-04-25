@@ -6,4 +6,6 @@
 *.pyc
 *.vtree
 *.sdd
+*.class
+*.json
 
