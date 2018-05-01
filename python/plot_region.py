@@ -2,6 +2,7 @@ from staticmap import Line, StaticMap
 import sys, json
 
 map_filename = sys.argv[1]
+out_filename = sys.argv[2]
 with open (map_filename, "r") as fp:
     map_spec = json.load(fp)
     edges = map_spec["edges"]
@@ -12,5 +13,5 @@ for edge in edges:
     dst_gps = node_locations[edge[1]]
     m.add_line(Line(((src_gps[1], src_gps[0]), (dst_gps[1], dst_gps[0])), "blue", 1))
 image = m.render()
-image.save("map.png")
+image.save(out_filename)
 

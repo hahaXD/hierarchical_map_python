@@ -15,6 +15,45 @@ import math
 import string
 from plot_prediction import *
 import logging
+from enum import Enum
+from hierarchical_map import HmNetwork, HmCluster
+
+class Haversine:
+    '''
+    use the haversine class to calculate the distance between
+    two lon/lat coordnate pairs.
+    output distance available in kilometers, meters, miles, and feet.
+    example usage: Haversine([lon1,lat1],[lon2,lat2]).feet
+    '''
+    def __init__(self,coord1,coord2):
+        lon1,lat1=coord1
+        lon2,lat2=coord2
+        R=6371000                               # radius of Earth in meters
+        phi_1=math.radians(lat1)
+        phi_2=math.radians(lat2)
+
+        delta_phi=math.radians(lat2-lat1)
+        delta_lambda=math.radians(lon2-lon1)
+
+        a=math.sin(delta_phi/2.0)**2+\
+           math.cos(phi_1)*math.cos(phi_2)*\
+           math.sin(delta_lambda/2.0)**2
+        c=2*math.atan2(math.sqrt(a),math.sqrt(1-a))
+        self.meters=R*c                         # output distance in meters
+        self.km=self.meters/1000.0              # output distance in kilometers
+        self.miles=self.meters*0.000621371      # output distance in miles
+        self.feet=self.miles*5280               # output distance in feet
+
+
+class MpeRoutePredictionMode(Enum):
+    simple = 1
+    step_by_step = 2
+    half_evidence = 3
+
+class DistanceMetric(Enum):
+    dsn = 1
+    hausdorff = 2
+    route_length = 3
 
 def byteify(input):
     if isinstance(input, dict):
@@ -26,6 +65,7 @@ def byteify(input):
         return input.encode('utf-8')
     else:
         return input
+
 def other_end(edge_tup, orig):
     if edge_tup[0] == orig:
         return edge_tup[1]
@@ -34,7 +74,7 @@ def other_end(edge_tup, orig):
 
 def sequence_path (path):
     if len(path) == 1:
-        return list(path)
+        return [path[0][0], path[0][1]]
     result = []
     node_to_edge = {}
     for edge in path:
@@ -59,7 +99,7 @@ def sequence_path (path):
             cur_node = other_end(edges[0], cur_node)
         result.append(cur_node)
     return result
-
+"""
 def generate_exactly_two_from_tuples(sdd_manager, tuples, variables):
     result_constraint = sdd.sdd_manager_false(sdd_manager)
     for cur_tup in tuples:
@@ -71,6 +111,7 @@ def generate_exactly_two_from_tuples(sdd_manager, tuples, variables):
                 cur_term = sdd.sdd_conjoin(cur_term, sdd.sdd_manager_literal(-cur_var, sdd_manager), sdd_manager)
         result_constraint = sdd.sdd_disjoin(cur_term, result_constraint, sdd_manager)
     return result_constraint
+"""
 
 def EdgeToIndex(sbn_spec):
     edge_index_map = {} # key is edge and value is index
@@ -128,556 +169,6 @@ def GenerateTrainingDataset(hm_network, sbn_spec, training_routes):
         data["data"].append(used_index)
     return data
 
-def generate_sdd_from_graphset(paths, sdd_manager, zdd_edge_to_sdd_edges):
-    try:
-        zdd_file = tempfile.TemporaryFile()
-        paths.dump(zdd_file)
-        zdd_file.seek(0)
-        zdd_content = zdd_file.readlines()
-    finally:
-        zdd_file.close()
-    # handle the trivial logic
-    if zdd_content[0].strip() == "T":
-        result_sdd = sdd.sdd_manager_true(sdd_manager)
-        for sdd_edges in zdd_edge_to_sdd_edges:
-            cur_neg_term = sdd.util.sdd_negative_term(sdd_manager, sdd_edges)
-            result_sdd = sdd.sdd_conjoin(result_sdd, cur_neg_term, sdd_manager)
-        return result_sdd
-    if zdd_content[0].strip() == "B":
-        result_sdd = sdd.sdd_manager_false(sdd_manager)
-        return result_sdd
-    pos_zdd_indicator_to_sdd = [None]
-    neg_zdd_indicator_to_sdd = [None]
-    for sdd_edges in zdd_edge_to_sdd_edges:
-        if sdd_edges:
-            pos_zdd_indicator_to_sdd.append(sdd.util.sdd_exactly_one(sdd_manager,sdd_edges))
-            neg_zdd_indicator_to_sdd.append(sdd.util.sdd_negative_term(sdd_manager, sdd_edges))
-    conversion_map = {} # key is the node index and the value is a sdd node
-    decision_variable_map = {} # key is the node index and the value is the variable index
-    last_node_index = None
-    zdd_variable_size = len(zdd_edge_to_sdd_edges) - 1;
-    def complete_zdd_child (variable_index, child, conversion_map, decision_variable_map, zdd_variable_size, sdd_manager):
-        if child == "T":
-            if variable_index != zdd_variable_size:
-                skipped_variables = range(variable_index + 1, zdd_variable_size + 1)
-                neg_terms = sdd.util.sdd_negative_term(sdd_manager, sum([zdd_edge_to_sdd_edges[x] for x in skipped_variables],[]))
-                return neg_terms
-            else:
-                return sdd.sdd_manager_true(sdd_manager)
-        elif child == "B":
-            return sdd.sdd_manager_false(sdd_manager)
-        else:
-            child = int(child)
-            child_variable = decision_variable_map[child]
-            if child_variable == variable_index + 1:
-                return conversion_map[child]
-            else:
-                skipped_variables = range(variable_index + 1, child_variable)
-                neg_terms = sdd.util.sdd_negative_term(sdd_manager, sum([zdd_edge_to_sdd_edges[x] for x in skipped_variables],[]))
-                return sdd.sdd_conjoin(neg_terms, conversion_map[child], sdd_manager)
-    for line in zdd_content:
-        line = line.strip()
-        if line == ".":
-            break;
-        line_toks = line.split(" ")
-        node_index = int(line_toks[0])
-        variable_index = int(line_toks[1])
-        low_child = line_toks[2]
-        high_child = line_toks[3]
-        sdd_low_child = None
-        sdd_high_child = None
-        sdd_low_child = complete_zdd_child(variable_index, low_child, conversion_map, decision_variable_map, zdd_variable_size, sdd_manager)
-        sdd_high_child = complete_zdd_child(variable_index, high_child, conversion_map, decision_variable_map, zdd_variable_size, sdd_manager)
-        cur_node_positive_element = sdd.sdd_conjoin(pos_zdd_indicator_to_sdd[variable_index], sdd_high_child, sdd_manager)
-        cur_node_negative_element = sdd.sdd_conjoin(neg_zdd_indicator_to_sdd[variable_index], sdd_low_child, sdd_manager)
-        conversion_map[node_index] = sdd.sdd_disjoin(cur_node_negative_element, cur_node_positive_element, sdd_manager)
-        decision_variable_map[node_index] = variable_index
-        last_node_index = node_index
-    if decision_variable_map[last_node_index] == 1:
-        return conversion_map[last_node_index]
-    else:
-        skipped_variables = range(1, decision_variable_map[last_node_index])
-        neg_terms = sdd.util.sdd_negative_term(sdd_manager, sum([zdd_edge_to_sdd_edges[x] for x in skipped_variables], []))
-        return sdd.sdd_conjoin(neg_terms, conversion_map[last_node_index], sdd_manager)
-
-
-class Edge(object):
-    def __init__(self,x,y,name):
-        if cmp(x,y) > 0: x,y = y,x
-        self.x = x
-        self.y = y
-        self.name = name
-        self.nodes = set([x,y])
-    def OtherEnd(self, input_end):
-        if self.x == input_end:
-            return self.y
-        else:
-            return self.x
-    def global_id(self):
-        return "e%d" % self.name
-
-    def as_tuple(self):
-        return (self.x,self.y)
-
-    def __repr__(self):
-        return "%s (%s,%s)" % (self.global_id(),str(self.x),str(self.y))
-
-    def __cmp__(self,other):
-        return cmp(self.name,other.name)
-
-    def __eq__ (self, other):
-        return (self.x, self.y, self.name) == (other.x, other.y, other.name)
-
-    def __hash__(self):
-        return hash((self.x, self.y, self.name))
-
-class Graph(object):
-    def __init__(self, edge_list):
-        self.edge_list = edge_list
-        self.node_to_edges = {}
-        for idx,cur_node_pair in enumerate(edge_list):
-            cur_edge = Edge(cur_node_pair[0], cur_node_pair[1], idx+1)
-            self.node_to_edges.setdefault(cur_node_pair[0], []).append(cur_edge)
-            self.node_to_edges.setdefault(cur_node_pair[1], []).append(cur_edge)
-
-class HmCluster (object):
-    @staticmethod
-    def GetLeaveCluster(name, node_indexes, graph):
-        a = HmCluster(name);
-        a.nodes = set(node_indexes)
-        a.internal_edges = set()
-        a.external_edges = {}
-        for node_index in node_indexes:
-            neighboring_edges = graph.node_to_edges[node_index]
-            for cur_neighboring_edge in neighboring_edges:
-                cur_neighboring_node = cur_neighboring_edge.OtherEnd(node_index)
-                if cur_neighboring_node in a.nodes:
-                    a.internal_edges.add(cur_neighboring_edge)
-                else:
-                    a.external_edges[cur_neighboring_edge] = node_index
-        return a
-    @staticmethod
-    def GetInternalCluster(name, child_clusters, graph):
-        a = HmCluster(name);
-        a.nodes = set.union(*[child.nodes for child in child_clusters])
-        a.children = {}
-        a.internal_edges = set()
-        a.external_edges = {} # key is the Edge and value is the connection child region
-        a.sub_region_edges = {}
-        node_to_child = {}
-        for child_cluster in child_clusters:
-            a.children[child_cluster.name] = child_cluster
-            for cur_node in child_cluster.nodes:
-                node_to_child[cur_node] = child_cluster
-        for child_cluster in child_clusters:
-            for cur_node_index in child_cluster.nodes:
-                neighboring_edges = graph.node_to_edges[cur_node_index]
-                for cur_neighboring_edge in neighboring_edges:
-                    cur_neighboring_node = cur_neighboring_edge.OtherEnd(cur_node_index)
-                    if cur_neighboring_node not in child_cluster.nodes and cur_neighboring_node in a.nodes:
-                        #internal edges
-                        a.internal_edges.add(cur_neighboring_edge)
-                        a_region_name = child_cluster.name
-                        b_region_name = node_to_child[cur_neighboring_node].name
-                        edge_tuple = (min(a_region_name, b_region_name), max(a_region_name, b_region_name))
-                        a.sub_region_edges.setdefault(edge_tuple, set()).add(cur_neighboring_edge)
-                    elif cur_neighboring_node not in a.nodes:
-                        #external edges
-                        a.external_edges[cur_neighboring_edge] = child_cluster.name
-                    else:
-                        pass
-        return a
-    @staticmethod
-    def GetCluster(cluster_name, hm_clusters, graph,  cache):
-        if cluster_name in cache:
-            return cache[cluster_name]
-        if "nodes" in hm_clusters[cluster_name]:
-            result  = HmCluster.GetLeaveCluster(cluster_name, hm_clusters[cluster_name]["nodes"], graph)
-            cache[cluster_name] = result
-            return result
-        else:
-            child_clusters = [HmCluster.GetCluster(child_cluster_name, hm_clusters, graph, cache) for child_cluster_name in hm_clusters[cluster_name]["sub_clusters"]]
-            result = HmCluster.GetInternalCluster(cluster_name, child_clusters, graph)
-            cache[cluster_name] = result
-            return result
-    def GetLocalConstraints(self, file_prefix):
-        if len(self.external_edges) == 0:
-            # root variable
-            return self.GetLocalConstraintsForRoot(file_prefix)
-        elif self.children:
-            # internal variable
-            return self.GetLocalConstraintsForInternalClusters(file_prefix)
-        else:
-            # leaf variable
-            return self.GetLocalConstraintsForLeaveClusters(file_prefix)
-    def GetLocalConstraintsForRoot(self, file_prefix):
-        then_vtree_filename = "%s/%s_then_vtree.vtree" % (file_prefix, self.name)
-        then_sdd_filename = "%s/%s_then_sdd.sdd" % (file_prefix, self.name)
-        constraint = {}
-        constraint["then_vtree"] = then_vtree_filename
-        constraint["then"] = [then_sdd_filename]
-        universe = []
-        # internal edges
-        for sub_region_edge_tup in self.sub_region_edges:
-            universe.append(sub_region_edge_tup)
-        GraphSet.set_universe(universe)
-        universe = GraphSet.universe()
-        paths = GraphSet()
-        child_names = self.children.keys()
-        for (i,j) in itertools.combinations(child_names, 2):
-            paths = paths.union(GraphSet.paths(i, j))
-        name_to_sdd_index = {}
-        zdd_to_sdd_index =  [None] # for generating sdd from graphset
-        sdd_index = 0
-        for child in child_names:
-            sdd_index += 1
-            name_to_sdd_index["c%s" %child] = sdd_index
-        for sub_region_edge in universe:
-            corresponding_network_edges = self.sub_region_edges[sub_region_edge]
-            coresponding_network_edges_sdd_index = []
-            for single_edge in corresponding_network_edges:
-                sdd_index += 1
-                name_to_sdd_index[str(single_edge)] = sdd_index;
-                coresponding_network_edges_sdd_index.append(sdd_index)
-            zdd_to_sdd_index.append(coresponding_network_edges_sdd_index)
-        constraint["then_variable_mapping"] = name_to_sdd_index
-        rl_vtree = sdd.sdd_vtree_new(sdd_index, "right")
-        sdd_manager = sdd.sdd_manager_new(rl_vtree)
-        sdd.sdd_vtree_free(rl_vtree)
-        sdd.sdd_manager_auto_gc_and_minimize_off(sdd_manager)
-        # Construct simple path constraint
-        simple_path_constraint = generate_sdd_from_graphset(paths, sdd_manager, zdd_to_sdd_index)
-        # non empty path in this region map
-        none_of_child = sdd.util.sdd_negative_term(sdd_manager, [name_to_sdd_index["c%s"%child] for child in self.children])
-        case_one = sdd.sdd_conjoin(none_of_child, simple_path_constraint, sdd_manager)
-        # empty path in this region map
-        exactly_one_child  = sdd.util.sdd_exactly_one(sdd_manager,[name_to_sdd_index["c%s"%child] for child in self.children])
-        empty_path_constraint = sdd.util.sdd_negative_term(sdd_manager, sum(zdd_to_sdd_index[1:], []))
-        case_two = sdd.sdd_conjoin(exactly_one_child, empty_path_constraint, sdd_manager)
-        total_constraint = sdd.sdd_disjoin(case_one, case_two, sdd_manager)
-        sdd.sdd_save(then_sdd_filename, total_constraint)
-        sdd.sdd_vtree_save(then_vtree_filename, sdd.sdd_manager_vtree(sdd_manager))
-        sdd.sdd_manager_free(sdd_manager)
-        return constraint
-    def GetLocalConstraintsForLeaveClusters(self, file_prefix):
-        if_vtree_filename = "%s/%s_if_vtree.vtree" % (file_prefix, self.name)
-        if_sdd_filename_prefix = "%s/%s_if_sdd" % (file_prefix, self.name)
-        then_vtree_filename = "%s/%s_then_vtree.vtree" % (file_prefix, self.name)
-        then_sdd_filename_prefix = "%s/%s_then_sdd" % (file_prefix, self.name)
-        ifs = []
-        thens = []
-        if_variable_mapping = {}
-        if_sdd_index = 0
-        if_sdd_index += 1
-        if_variable_mapping["c%s"% self.name] = if_sdd_index # cluster indicator for current cluster
-        for external_edge in self.external_edges:
-            if_sdd_index += 1
-            if_variable_mapping[str(external_edge)] = if_sdd_index
-        then_variable_mapping = {}
-        zdd_to_sdd_index = [None]
-        universe = []
-        node_pair_to_edges = {}
-        for internal_edge in self.internal_edges:
-            if (internal_edge.x, internal_edge.y) not in node_pair_to_edges:
-                universe.append((internal_edge.x, internal_edge.y))
-            node_pair_to_edges.setdefault((internal_edge.x, internal_edge.y), []).append(internal_edge)
-        GraphSet.set_universe(universe)
-        universe = GraphSet.universe()
-        then_sdd_index = 0
-        for node_pair in universe:
-            correponding_sdd_indexes = []
-            for internal_edge in node_pair_to_edges[node_pair]:
-                then_sdd_index += 1
-                then_variable_mapping[str(internal_edge)] = then_sdd_index
-                correponding_sdd_indexes.append(then_sdd_index)
-            zdd_to_sdd_index.append(correponding_sdd_indexes)
-        if_vtree, then_vtree = sdd.sdd_vtree_new(if_sdd_index, "right"), sdd.sdd_vtree_new(then_sdd_index, "right")
-        if_manager, then_manager = sdd.sdd_manager_new(if_vtree), sdd.sdd_manager_new(then_vtree)
-        sdd.sdd_manager_auto_gc_and_minimize_off(if_manager)
-        sdd.sdd_manager_auto_gc_and_minimize_off(then_manager)
-        sdd.sdd_vtree_free(if_vtree)
-        sdd.sdd_vtree_free(then_vtree)
-        #none of the external edges are used and cluster indicator is off
-        case_index = 0
-        case_one_if = sdd.util.sdd_negative_term(if_manager, range(1, if_sdd_index +1))
-        case_one_then = sdd.util.sdd_negative_term(then_manager, range(1, then_sdd_index+1))
-        sdd.sdd_save("%s_%s" % (if_sdd_filename_prefix, case_index), case_one_if)
-        sdd.sdd_save("%s_%s" % (then_sdd_filename_prefix, case_index), case_one_then)
-        ifs.append("%s_%s" % (if_sdd_filename_prefix, case_index))
-        thens.append("%s_%s" % (then_sdd_filename_prefix, case_index))
-        #none of the external edges are used and cluster indicator is on
-        case_index += 1
-        case_two_if = sdd.util.sdd_exactly_one_among(if_manager, [if_variable_mapping["c%s"%self.name]], range(1, if_sdd_index+1))
-        paths = GraphSet()
-        for (i,j) in itertools.combinations(self.nodes, 2):
-            paths = paths.union(GraphSet.paths(i,j))
-        case_two_then = generate_sdd_from_graphset(paths, then_manager, zdd_to_sdd_index)
-        sdd.sdd_save("%s_%s" % (if_sdd_filename_prefix, case_index), case_two_if)
-        sdd.sdd_save("%s_%s" % (then_sdd_filename_prefix, case_index), case_two_then)
-        ifs.append("%s_%s" % (if_sdd_filename_prefix, case_index))
-        thens.append("%s_%s" % (then_sdd_filename_prefix, case_index))
-        #exactly one of the external edge is used and cluster indicator is off
-        aggregated_cases = {}
-        for external_edge in self.external_edges:
-            aggregated_cases.setdefault(self.external_edges[external_edge],[]).append(external_edge)
-        for entering_node in aggregated_cases:
-            case_index += 1
-            cur_case_if = sdd.util.sdd_exactly_one_among(if_manager, [if_variable_mapping[str(e)] for e in aggregated_cases[entering_node]], range(1, if_sdd_index+1))
-            paths = GraphSet()
-            for node in self.nodes:
-                if node == entering_node:
-                    continue
-                paths = paths.union(GraphSet.paths(entering_node, node))
-            cur_case_then = generate_sdd_from_graphset(paths, then_manager, zdd_to_sdd_index)
-            # disjoin the empty path
-            cur_case_then = sdd.sdd_disjoin(cur_case_then, sdd.util.sdd_negative_term(then_manager, range(1, then_sdd_index+1)), then_manager)
-            sdd.sdd_save("%s_%s" % (if_sdd_filename_prefix, case_index), cur_case_if)
-            sdd.sdd_save("%s_%s" % (then_sdd_filename_prefix, case_index), cur_case_then)
-            ifs.append("%s_%s" % (if_sdd_filename_prefix, case_index))
-            thens.append("%s_%s" % (then_sdd_filename_prefix, case_index))
-        # exactly two of the external edge is used and cluster_indicator is off
-        aggregated_cases = {}
-        for (i,j) in itertools.combinations(self.external_edges.keys(), 2):
-            entering_points = (self.external_edges[i], self.external_edges[j])
-            entering_points = (max(entering_points), min(entering_points))
-            aggregated_cases.setdefault(entering_points, []).append((i,j))
-        for entering_points in aggregated_cases:
-            case_index +=1
-            entering_edges = aggregated_cases[entering_points]
-            cur_case_if = generate_exactly_two_from_tuples(if_manager, [(if_variable_mapping[str(e1)], if_variable_mapping[str(e2)]) for (e1,e2) in entering_edges], range(1, if_sdd_index+1))
-            if entering_points[0] == entering_points[1]:
-                cur_case_then = sdd.util.sdd_negative_term(then_manager, range(1, then_sdd_index+1))
-            else:
-                paths = GraphSet.paths(entering_points[0], entering_points[1])
-                cur_case_then = generate_sdd_from_graphset(paths, then_manager, zdd_to_sdd_index)
-            sdd.sdd_save("%s_%s" % (if_sdd_filename_prefix, case_index), cur_case_if)
-            sdd.sdd_save("%s_%s" % (then_sdd_filename_prefix, case_index), cur_case_then)
-            ifs.append("%s_%s" % (if_sdd_filename_prefix, case_index))
-            thens.append("%s_%s" % (then_sdd_filename_prefix, case_index))
-        sdd.sdd_vtree_save(if_vtree_filename, sdd.sdd_manager_vtree(if_manager))
-        sdd.sdd_vtree_save(then_vtree_filename, sdd.sdd_manager_vtree(then_manager))
-        sdd.sdd_manager_free(if_manager)
-        sdd.sdd_manager_free(then_manager)
-        constraint = {}
-        constraint["if_vtree"] = if_vtree_filename
-        constraint["if"] = ifs
-        constraint["if_variable_mapping"] = if_variable_mapping
-        constraint["then_vtree"] = then_vtree_filename
-        constraint["then"] = thens
-        constraint["then_variable_mapping"] = then_variable_mapping
-        return constraint
-
-    def GetLocalConstraintsForInternalClusters(self, file_prefix):
-        if_vtree_filename = "%s/%s_if_vtree.vtree" % (file_prefix, self.name)
-        if_sdd_filename_prefix = "%s/%s_if_sdd" % (file_prefix, self.name)
-        then_vtree_filename = "%s/%s_then_vtree.vtree" % (file_prefix, self.name)
-        then_sdd_filename_prefix = "%s/%s_then_sdd" % (file_prefix, self.name)
-        ifs = []
-        thens = []
-        if_variable_mapping = {}
-        if_sdd_index = 0
-        if_sdd_index += 1
-        if_variable_mapping["c%s"% self.name] = if_sdd_index # cluster indicator for current cluster
-        for external_edge in self.external_edges:
-            if_sdd_index += 1
-            if_variable_mapping[str(external_edge)] = if_sdd_index
-        then_variable_mapping = {}
-        # variables for the child clusters
-        then_sdd_index = 0
-        zdd_to_sdd_index = [None]
-        for child in self.children:
-            then_sdd_index += 1
-            then_variable_mapping["c%s" %child] = then_sdd_index
-        universe = self.sub_region_edges.keys()
-        GraphSet.set_universe(universe)
-        universe = GraphSet.universe();
-        for node_pair in universe:
-            correponding_sdd_indexes = []
-            for internal_edge in self.sub_region_edges[node_pair]:
-                then_sdd_index += 1
-                then_variable_mapping[str(internal_edge)] = then_sdd_index
-                correponding_sdd_indexes.append(then_sdd_index)
-            zdd_to_sdd_index.append(correponding_sdd_indexes)
-        if_vtree, then_vtree = sdd.sdd_vtree_new(if_sdd_index, "right"), sdd.sdd_vtree_new(then_sdd_index, "right")
-        if_manager, then_manager = sdd.sdd_manager_new(if_vtree), sdd.sdd_manager_new(then_vtree)
-        sdd.sdd_manager_auto_gc_and_minimize_off(if_manager)
-        sdd.sdd_manager_auto_gc_and_minimize_off(then_manager)
-        sdd.sdd_vtree_free(if_vtree)
-        sdd.sdd_vtree_free(then_vtree)
-        #none of the external edges are used and cluster indicator is off
-        case_index = 0
-        case_one_if = sdd.util.sdd_negative_term(if_manager, range(1, if_sdd_index +1))
-        case_one_then = sdd.util.sdd_negative_term(then_manager, range(1, then_sdd_index+1))
-        sdd.sdd_save("%s_%s" % (if_sdd_filename_prefix, case_index), case_one_if)
-        sdd.sdd_save("%s_%s" % (then_sdd_filename_prefix, case_index), case_one_then)
-        ifs.append("%s_%s" % (if_sdd_filename_prefix, case_index))
-        thens.append("%s_%s" % (then_sdd_filename_prefix, case_index))
-        #none of the external edges are used and cluster indicator is on
-        case_index += 1
-        case_two_if = sdd.util.sdd_exactly_one_among(if_manager, [if_variable_mapping["c%s"%self.name]], range(1, if_sdd_index+1))
-        #***Non empty path in this region map
-        none_of_child = sdd.util.sdd_negative_term(then_manager, [then_variable_mapping["c%s"%child] for child in self.children])
-        paths = GraphSet()
-        child_names = self.children.keys()
-        for c1, c2 in itertools.combinations(child_names, 2):
-            paths = paths.union(GraphSet.paths(c1, c2))
-        simple_path_constraint = generate_sdd_from_graphset(paths, then_manager, zdd_to_sdd_index)
-        case_one = sdd.sdd_conjoin(simple_path_constraint, none_of_child, then_manager)
-        #***Empty path in the region map
-        exactly_one_chlid = sdd.util.sdd_exactly_one(then_manager, [then_variable_mapping["c%s"%child] for child in self.children])
-        empty_path_constraint = sdd.util.sdd_negative_term(then_manager, sum(zdd_to_sdd_index[1:], []))
-        case_two = sdd.sdd_conjoin(empty_path_constraint, exactly_one_chlid, then_manager)
-        case_two_then = sdd.sdd_disjoin(case_one, case_two, then_manager)
-        sdd.sdd_save("%s_%s" % (if_sdd_filename_prefix, case_index), case_two_if)
-        sdd.sdd_save("%s_%s" % (then_sdd_filename_prefix, case_index), case_two_then)
-        ifs.append("%s_%s" % (if_sdd_filename_prefix, case_index))
-        thens.append("%s_%s" % (then_sdd_filename_prefix, case_index))
-        #Exactly one of the external edge is used and cluster_indicator is off
-        aggregated_cases = {}
-        for external_edge in self.external_edges:
-            aggregated_cases.setdefault(self.external_edges[external_edge],[]).append(external_edge)
-        for entering_node in aggregated_cases:
-            case_index += 1
-            cur_case_if = sdd.util.sdd_exactly_one_among(if_manager, [if_variable_mapping[str(e)] for e in aggregated_cases[entering_node]], range(1, if_sdd_index+1))
-            paths = GraphSet()
-            for child in self.children:
-                if child == entering_node:
-                    continue
-                paths = paths.union(GraphSet.paths(entering_node, child))
-            cur_case_then = generate_sdd_from_graphset(paths, then_manager, zdd_to_sdd_index)
-            cur_case_then = sdd.sdd_disjoin(cur_case_then, sdd.util.sdd_negative_term(then_manager, [then_variable_mapping[str(e)] for e in self.internal_edges]), then_manager)
-            #conjoin that all the child indicator is off
-            cur_case_then = sdd.sdd_conjoin(cur_case_then, sdd.util.sdd_negative_term(then_manager, [then_variable_mapping["c%s"% child] for child in self.children]), then_manager)
-            sdd.sdd_save("%s_%s" % (if_sdd_filename_prefix, case_index), cur_case_if)
-            sdd.sdd_save("%s_%s" % (then_sdd_filename_prefix, case_index), cur_case_then)
-            ifs.append("%s_%s" % (if_sdd_filename_prefix, case_index))
-            thens.append("%s_%s" % (then_sdd_filename_prefix, case_index))
-        #Exactly two of the external edge is used and cluster_indicator is off
-        aggregated_cases = {}
-        for (i,j) in itertools.combinations(self.external_edges.keys(), 2):
-            entering_points = (self.external_edges[i], self.external_edges[j])
-            entering_points = (max(entering_points), min(entering_points))
-            aggregated_cases.setdefault(entering_points, []).append((i,j))
-        for entering_points in aggregated_cases:
-            case_index +=1
-            entering_edges = aggregated_cases[entering_points]
-            cur_case_if = generate_exactly_two_from_tuples(if_manager, [(if_variable_mapping[str(e1)], if_variable_mapping[str(e2)]) for (e1,e2) in entering_edges], range(1, if_sdd_index+1))
-            if entering_points[0] == entering_points[1]:
-                cur_case_then = sdd.util.sdd_negative_term(then_manager, range(1, then_sdd_index+1))
-            else:
-                paths = GraphSet.paths(entering_points[0], entering_points[1])
-                cur_case_then = generate_sdd_from_graphset(paths, then_manager, zdd_to_sdd_index)
-                cur_case_then = sdd.sdd_conjoin(cur_case_then, sdd.util.sdd_negative_term(then_manager, [then_variable_mapping["c%s" % child] for child in self.children]),then_manager)
-            sdd.sdd_save("%s_%s" % (if_sdd_filename_prefix, case_index), cur_case_if)
-            sdd.sdd_save("%s_%s" % (then_sdd_filename_prefix, case_index), cur_case_then)
-            ifs.append("%s_%s" % (if_sdd_filename_prefix, case_index))
-            thens.append("%s_%s" % (then_sdd_filename_prefix, case_index))
-        sdd.sdd_vtree_save(if_vtree_filename, sdd.sdd_manager_vtree(if_manager))
-        sdd.sdd_vtree_save(then_vtree_filename, sdd.sdd_manager_vtree(then_manager))
-        sdd.sdd_manager_free(if_manager)
-        sdd.sdd_manager_free(then_manager)
-        constraint = {}
-        constraint["if_vtree"] = if_vtree_filename
-        constraint["if"] = ifs
-        constraint["if_variable_mapping"] = if_variable_mapping
-        constraint["then_vtree"] = then_vtree_filename
-        constraint["then"] = thens
-        constraint["then_variable_mapping"] = then_variable_mapping
-        return constraint
-
-    def __init__(self, name):
-        self.name = name
-        self.nodes = None
-        self.children = None
-        self.internal_edges = None
-        self.external_edges = None
-        self.sub_region_edges = None
-
-class HmNetwork(object):
-    def __init__(self):
-        self.clusters = {}
-        pass
-    @staticmethod
-    def ReadHmSpec(hm_spec):
-        graph = Graph(hm_spec["edges"])
-        cluster_spec = hm_spec["clusters"]
-        cluster_node_indexes = {}
-        variable_index = len(graph.edge_list) + 1
-        for cluster_name in cluster_spec:
-            cur_cluster_spec = cluster_spec[cluster_name]
-            if "sub_clusters" in cur_cluster_spec:
-                for sub_cluster_name in cur_cluster_spec["sub_clusters"]:
-                    cluster_node_indexes[sub_cluster_name] = variable_index
-                    variable_index += 1
-        result = HmNetwork()
-        for cluster_name in cluster_spec:
-            if cluster_name not in result.clusters:
-                HmCluster.GetCluster(cluster_name, cluster_spec, graph, result.clusters)
-        return result
-
-    def TopologicalSort(self):
-        leave_to_root_order = []
-        node_queue = [self.clusters[cluster_name] for cluster_name in self.clusters]
-        while len(node_queue) > 0:
-            leave_nodes = [x for x in node_queue if x.children == None or all( x.children[p] in leave_to_root_order for p in x.children)]
-            node_queue = [x for x in node_queue if x not in leave_nodes]
-            leave_to_root_order.extend(leave_nodes)
-        return leave_to_root_order
-
-    def write_hierarchy_to_dot(self, dot_filename):
-        dot_file_content = "digraph g {\n"
-        for cluster_name in self.clusters:
-            cur_cluster = self.clusters[cluster_name]
-            if cur_cluster.children == None:
-                continue
-            for child_cluster_name in cur_cluster.children:
-                child_cluster = cur_cluster.children[child_cluster_name]
-                dot_file_content += "%s -> %s\n" % (cluster_name, child_cluster.name)
-        dot_file_content += "}"
-        with open(dot_filename , "w") as fp:
-            fp.write(dot_file_content)
-
-    def CompileToSBN(self, prefix):
-        variables = []
-        for cluster_name in self.clusters:
-            cluster = self.clusters[cluster_name]
-            if cluster.children == None:
-                continue
-            for child_name in cluster.children:
-                variables.append("c%s"%child_name)
-        cluster_to_variables = {}
-        for cluster_name in self.clusters:
-            cluster = self.clusters[cluster_name]
-            cur_variables = []
-            for edge in cluster.internal_edges:
-                variables.append(str(edge))
-                cur_variables.append(str(edge))
-            cluster_to_variables[cluster_name] = cur_variables
-        spec = {}
-        spec["variables"] = variables
-        spec["clusters"] = []
-        for cluster_name in self.clusters:
-            logger = logging.getLogger()
-            logger.info("Processing Cluster %s " % cluster_name)
-            cluster = self.clusters[cluster_name]
-            cluster_spec = {}
-            cluster_spec["cluster_name"] = cluster.name
-            cluster_spec["variables"] = []
-            for edge in cluster.internal_edges:
-                cluster_spec["variables"].append(str(edge))
-            if cluster.children != None:
-                for child_name in cluster.children:
-                    cluster_spec["variables"].append("c%s"%child_name)
-            cur_external_edges = cluster.external_edges.keys()
-            cluster_spec["parents"] = []
-            for parent_name in self.clusters:
-                parent_cluster = self.clusters[parent_name]
-                if any([x in parent_cluster.internal_edges for x in cur_external_edges]):
-                    cluster_spec["parents"].append(parent_cluster.name)
-            cluster_spec["constraint"] = cluster.GetLocalConstraints(prefix)
-            spec["clusters"].append(cluster_spec)
-        return spec
-
 def RemoveSelfLoop (edges):
     new_edges = []
     for edge_tup in edges:
@@ -685,6 +176,8 @@ def RemoveSelfLoop (edges):
             continue
         new_edges.append(edge_tup)
     return new_edges
+
+
 def construct_cnf(src_edge_indexes, dst_edge_indexes, evid_edge_indexes, output_filename, variable_size):
     cnf = []
     cnf.append(list(src_edge_indexes))
@@ -707,7 +200,7 @@ def ParseMpeOutput(output):
         line = line.strip()
         if line.find("MPE result") != -1:
             results = set()
-            raw_result = line,split("=")[1].split(",")
+            raw_result = line.split("=")[1].split(",")
             for tok in raw_result:
                 if tok.strip() == "":
                     continue
@@ -717,13 +210,141 @@ def ParseMpeOutput(output):
                     results.add(var_index)
     return results
 
-def RoutePredictionPerRoute(test_route, node_to_edge_indexes, pair_to_index, sdd_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size, step_by_step, node_locations):
+def CalculateDSN(route_1, route_2):
+    if type(route_1) is not set:
+        route_1 = set(route_1)
+    if type(route_2) is not set:
+        route_2 = set(route_2)
+    common = route_1.intersection(route_2)
+    mis_match = 0;
+    for i in route_1:
+        if i not in common:
+            mis_match += 1
+    for i in route_2:
+        if i not in common:
+            mis_match += 1
+    total_len = len(route_1) + len(route_2)
+    return float(mis_match) / total_len
+
+def CalculateHausdorffDistance(route_1, route_2, index_to_tuples, node_locations):
+    edge_route_1 = []
+    edge_route_2 = []
+    for edge_index in route_1:
+        edge_route_1.append(index_to_tuples[edge_index])
+    for edge_index in route_2:
+        edge_route_2.append(index_to_tuples[edge_index])
+    sequence_1 = sequence_path(edge_route_1)
+    sequence_2 = sequence_path(edge_route_2)
+    inf_distances = []
+    for node_1 in sequence_1:
+        inf_distances.append(min([Haversine(node_locations[node_1], node_locations[i]).feet for i in sequence_2]))
+    sup_1 = max(inf_distances)
+    inf_distances = []
+    for node_2 in sequence_2:
+        inf_distances.append(min([Haversine(node_locations[node_2], node_locations[i]).feet for i in sequence_1]))
+    sup_2 = max(inf_distances)
+    return max(sup_1, sup_2)
+
+def FindConnectedPath(edges_set, starting_node, index_to_edges):
+    node_to_edge_pairs = {}
+    pair_to_index = {}
+    for edge in edges_set:
+        edge_pair = index_to_edges[edge]
+        pair_to_index[edge_pair] = edge
+        node_to_edge_pairs.setdefault(edge_pair[0],[]).append(edge_pair)
+        node_to_edge_pairs.setdefault(edge_pair[1],[]).append(edge_pair)
+    found_edges = set()
+    open_nodes = [starting_node]
+    closed_nodes = set()
+    if starting_node not in node_to_edge_pairs:
+        return []
+    while len(open_nodes) > 0:
+        cur_node = open_nodes[0]
+        open_nodes = open_nodes[1:]
+        neighboring_edges = node_to_edge_pairs[cur_node]
+        for pair in neighboring_edges:
+            other_node = other_end(pair, cur_node)
+            found_edges.add(pair)
+            if other_node not in closed_nodes:
+                open_nodes.append(other_node)
+                closed_nodes.add(other_node)
+    return [pair_to_index[i] for i in found_edges]
+
+def FindPathBetween(edges_set, start_node, end_node, index_to_edges):
+    node_to_edge_pairs = {}
+    pair_to_index = {}
+    for edge in edges_set:
+        edge_pair = index_to_edges[edge]
+        pair_to_index[edge_pair] = edge
+        node_to_edge_pairs.setdefault(edge_pair[0],[]).append(edge_pair)
+        node_to_edge_pairs.setdefault(edge_pair[1],[]).append(edge_pair)
+    queue = [(start_node, [start_node])]
+    path_sequence = None
+    while len(queue) > 0:
+        cur_state = queue[0]
+        cur_node_index = cur_state[0]
+        cur_sequence = cur_state[1]
+        assert cur_sequence[0] == cur_node_index
+        queue = queue[1:]
+        if cur_node_index == end_node:
+            path_sequence = cur_state[1]
+            break
+        neighboring_edges = node_to_edge_pairs[cur_node_index]
+        for edge in neighboring_edges:
+            other_end_index = other_end(edge, cur_node_index)
+            if len(cur_sequence) == 1:
+                new_state = (other_end_index, [other_end_index, cur_sequence[0]])
+            else:
+                last_node_index = cur_sequence[1]
+                if last_node_index != other_end_index:
+                    new_state = (other_end_index, [other_end_index] + cur_sequence)
+                else:
+                    continue
+            queue.append(new_state)
+    if path_sequence is None:
+        return None
+    assert path_sequence[0] == end_node and path_sequence[-1] == start_node
+    result = []
+    for i in range(0, len(path_sequence)-1):
+        node_a = path_sequence[i]
+        node_b = path_sequence[i+1]
+        cur_edge = (min(node_a, node_b), max(node_a, node_b))
+        result.append(pair_to_index[cur_edge])
+    return result
+
+
+# route_1 - route_2
+def CalculateRouteLengthDistance(route_1, route_2, index_to_tuples, node_locations):
+    edge_route_1 = []
+    edge_route_2 = []
+    for edge_index in route_1:
+        edge_route_1.append(index_to_tuples[edge_index])
+    for edge_index in route_2:
+        edge_route_2.append(index_to_tuples[edge_index])
+    sequence_1 = sequence_path(edge_route_1)
+    sequence_2 = sequence_path(edge_route_2)
+    route_1_length = sum([Haversine(node_locations[sequence_1[i]],node_locations[sequence_1[i+1]]).feet for i in range(0, len(sequence_1)-1)])
+    route_2_length = sum([Haversine(node_locations[sequence_2[i]],node_locations[sequence_2[i+1]]).feet for i in range(0, len(sequence_2)-1)])
+    return route_1_length - route_2_length
+
+def CalculateRouteDistance(route, index_to_tuples, node_locations):
+    edge_route_1 = []
+    for edge_index in route:
+        edge_route_1.append(index_to_tuples[edge_index])
+    sequence_1 = sequence_path(edge_route_1)
+    route_1_length = sum([Haversine(node_locations[sequence_1[i]],node_locations[sequence_1[i+1]]).feet for i in range(0, len(sequence_1)-1)])
+    return route_1_length
+
+
+def RoutePredictionPerRoute(test_route, node_to_edge_indexes, pair_to_index, sdd_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size, running_mode, distance_metric, node_locations):
     logger = logging.getLogger()
     sequence_route = sequence_path(test_route)
     used_edge_indexes = []
     index_to_tuples = {}
+    edge_indexes_set = set()
     for pair in pair_to_index:
         index_to_tuples[pair_to_index[pair]] = pair
+        edge_indexes_set.add(pair_to_index[pair])
     for i in range(1, len(sequence_route)):
         node_a = sequence_route[i-1]
         node_b = sequence_route[i]
@@ -732,7 +353,7 @@ def RoutePredictionPerRoute(test_route, node_to_edge_indexes, pair_to_index, sdd
     logger.info("Testing route with node sequence : %s, indexes of used edges : %s" % (sequence_route, used_edge_indexes))
     src_node = sequence_route[0]
     dst_node = sequence_route[-1]
-    if not step_by_step:
+    if running_mode is MpeRoutePredictionMode.simple:
         cnf_filename = "%s_src_and_dst_evid.cnf" % (sdd_filename_prefix)
         construct_cnf(node_to_edge_indexes[src_node], node_to_edge_indexes[dst_node], [], cnf_filename, variable_size)
         cmd = "%s --mpe_query --cnf_evid %s %s %s" % (inference_binary, cnf_filename, learned_psdd_filename, learned_vtree_filename)
@@ -741,10 +362,19 @@ def RoutePredictionPerRoute(test_route, node_to_edge_indexes, pair_to_index, sdd
         mpe_result = ParseMpeOutput(output)
         plot_filename = "%s_src_and_dst.png" % sdd_filename_prefix
         plot_mpe_prediction(index_to_tuples, node_locations, mpe_result, [], used_edge_indexes, src_node, dst_node, plot_filename)
-    else:
+        if distance_metric is DistanceMetric.dsn:
+            return [CalculateDSN(used_edge_indexes, mpe_result.intersection(edge_indexes_set))]
+        elif distance_metric is DistanceMetric.route_length:
+            return [CalculateRouteLengthDistance(mpe_result.intersection(edge_indexes_set), used_edge_indexes, index_to_tuples, node_locations)]
+        else:
+            assert distance_metric is DistanceMetric.hausdorff
+            return [CalculateHausdorffDistance(used_edge_indexes, mpe_result.intersection(edge_indexes_set), index_to_tuples, node_locations)]
+    elif running_mode is MpeRoutePredictionMode.step_by_step:
         edges_evid = []
         mpe_result = None
+        distances = []
         for i in range(0, len(sequence_route)-1):
+            logger.info("Making prediction with used edges: %s" % edges_evid)
             succeed = False
             attempt_index = 0
             while not succeed:
@@ -755,14 +385,82 @@ def RoutePredictionPerRoute(test_route, node_to_edge_indexes, pair_to_index, sdd
                 output = subprocess.check_output(shlex.split(cmd))
                 mpe_result = ParseMpeOutput(output)
                 if mpe_result is None:
+                    edges_evid = edges_evid[1:]
                     continue
                 else:
                     succeed = True
                     break
-        assert mpe_result is not None
-        plot_filename = "%s_%s.png" % (sdd_filename_prefix, i)
-        plot_mpe_prediction(index_to_tuples, node_locations, mpe_result, edges_evid, used_edge_indexes, src_node, dst_node, plot_filename)
-
+            assert mpe_result is not None
+            plot_filename = "%s_%s.png" % (sdd_filename_prefix, i)
+            plot_mpe_prediction(index_to_tuples, node_locations, mpe_result, edges_evid, used_edge_indexes, src_node, dst_node, plot_filename)
+            edges_evid.append(used_edge_indexes[i])
+            previous_edges = set()
+            for j in range(0, i):
+                node_a = sequence_route[j]
+                node_b = sequence_route[j+1]
+                node_pair = (min(node_a, node_b), max(node_a, node_b))
+                previous_edges.add(pair_to_index[node_pair])
+            mpe_remaining_route = set()
+            actual_remaining_route = set()
+            for edge_index in mpe_result:
+                if edge_index in edge_indexes_set and edge_index not in previous_edges:
+                    mpe_remaining_route.add(edge_index)
+            for j in range(i,len(sequence_route)-1):
+                node_a = sequence_route[j]
+                node_b = sequence_route[j+1]
+                node_pair = (min(node_a, node_b), max(node_a, node_b))
+                actual_remaining_route.add(pair_to_index[node_pair])
+            connected_remaining_route = FindConnectedPath(mpe_remaining_route, sequence_route[i], index_to_tuples)
+            if len(connected_remaining_route) == 0 :
+                mpe_remaining_route = FindConnectedPath(mpe_remaining_route, sequence_route[-1], index_to_tuples)
+            else:
+                mpe_remaining_route = connected_remaining_route
+            if distance_metric is DistanceMetric.dsn:
+                distances.append(CalculateDSN(actual_remaining_route, mpe_remaining_route))
+            elif distance_metric is DistanceMetric.route_length:
+                distances.append(CalculateRouteLengthDistance(mpe_remaining_route, actual_remaining_route, index_to_tuples, node_locations))
+            else:
+                assert distance_metric is DistanceMetric.hausdorff
+                distances.append(CalculateHausdorffDistance(actual_remaining_route, mpe_remaining_route, index_to_tuples, node_locations))
+        return distances
+    else:
+        assert running_mode is MpeRoutePredictionMode.half_evidence
+        # generating evidence
+        edge_evidence = []
+        mid_point = len(sequence_route) / 2
+        for i in range(0, mid_point-1):
+            node_a = sequence_route[i]
+            node_b = sequence_route[i+1]
+            edge_pair = (min(node_a, node_b), max(node_a, node_b))
+            edge_index = pair_to_index[edge_pair]
+            edge_evidence.append(edge_index)
+        used_edges = list(edge_evidence)
+        logger.info("Making prediction with used edges: %s" % edge_evidence)
+        cnf_filename = "%s_half_evid.cnf" % (sdd_filename_prefix)
+        while True:
+            if len(edge_evidence) == 0 and mid_point > 1:
+                src_node = sequence_route[mid_point-1]
+            construct_cnf(node_to_edge_indexes[src_node], node_to_edge_indexes[dst_node], edge_evidence, cnf_filename, variable_size)
+            cmd = "%s --mpe_query --cnf_evid %s %s %s" % (inference_binary, cnf_filename, learned_psdd_filename, learned_vtree_filename)
+            logger.debug("Running command : %s" % cmd)
+            output = subprocess.check_output(shlex.split(cmd))
+            mpe_result = ParseMpeOutput(output)
+            if mpe_result is None:
+                edge_evidence = edge_evidence[1:]
+                continue
+            else:
+                break
+        plot_filename = "%s_half_evid.png" % sdd_filename_prefix
+        plot_mpe_prediction(index_to_tuples, node_locations, mpe_result, used_edges, used_edge_indexes, src_node, dst_node, plot_filename)
+        actual_remaining_edges = set(used_edge_indexes).difference(used_edges)
+        predicted_remaining_edges = FindPathBetween(mpe_result.intersection(edge_indexes_set), sequence_route[mid_point-1], sequence_route[-1], index_to_tuples)
+        if distance_metric is DistanceMetric.dsn:
+            return [CalculateDSN(actual_remaining_edges, predicted_remaining_edges)]
+        elif distance_metric is DistanceMetric.route_length:
+            return [CalculateRouteLengthDistance(predicted_remaining_edges, actual_remaining_edges, index_to_tuples, node_locations)], CalculateRouteDistance(predicted_remaining_edges, index_to_tuples, node_locations), CalculateRouteDistance(actual_remaining_edges, index_to_tuples, node_locations)
+        else:
+            assert distance_metric is DistanceMetric.hausdorff
+            return [CalculateHausdorffDistance(actual_remaining_edges, predicted_remaining_edges, index_to_tuples, node_locations)]
 
 def TestSingleRoute(test_route, node_to_edge_indexes, pair_to_index, sdd_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size):
     logger = logging.getLogger()
@@ -848,6 +546,10 @@ if __name__ == "__main__":
     parser.add_option("--mpe_test", action="store_true", dest="mpe_test")
     parser.add_option("--mar_test", action="store_true", dest="mar_test")
     parser.add_option("--mpe_step", action="store_true", dest="mpe_step")
+    parser.add_option("--mpe_half_evid", action="store_true", dest="mpe_half_evid")
+    parser.add_option("--dsn_distance", action="store_true", dest="dsn_distance")
+    parser.add_option("--hausdorff_distance", action="store_true", dest="hausdorff_distance")
+    parser.add_option("--route_length_distance", action="store_true", dest="route_length_distance")
     (options,args) = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger()
@@ -949,8 +651,29 @@ if __name__ == "__main__":
             total_accurate += cur_accurate
         print "Accurate prediction: %s, Total prediction: %s, Accuracy: %s" % (total_accurate, total_prediction, float(total_accurate)/total_prediction)
     if testing_routes is not None and options.mpe_test:
-        for idx, test_route = enumerate(testing_routes):
-            step_by_step = False
+        dsns = []
+        total_pred_distance = 0;
+        total_actual_distance = 0
+        for idx, test_route in enumerate(testing_routes):
+            mpe_option = MpeRoutePredictionMode.simple
             if options.mpe_step:
-                step_by_step = True
-            RoutePredictionPerRoute(test_rotue, node_to_edges, edge_to_indexes, "%s/%s" % (sdd_dir, idx), inference_binary, psdd_filename, vtree_filename, len(sbn_spec["variables"]), step_by_step, hm_spec["nodes_location"])
+                mpe_option = MpeRoutePredictionMode.step_by_step
+            if options.mpe_half_evid:
+                mpe_option = MpeRoutePredictionMode.half_evidence
+            distance_metric = DistanceMetric.dsn
+            if options.dsn_distance:
+                distance_metric = DistanceMetric.dsn
+            if options.hausdorff_distance:
+                distance_metric = DistanceMetric.hausdorff
+            if options.route_length_distance:
+                distance_metric = DistanceMetric.route_length
+            cur_dsn = RoutePredictionPerRoute(test_route, node_to_edges, edge_to_indexes, "%s/%s" % (sdd_dir, idx), inference_binary, psdd_filename, vtree_filename, len(sbn_spec["variables"]), mpe_option, distance_metric, hm_spec["nodes_location"])
+            if distance_metric is DistanceMetric.route_length:
+                total_pred_distance += cur_dsn[1]
+                total_actual_distance += cur_dsn[2]
+                cur_dsn = cur_dsn[0]
+            logger.info("Testing route %s disimilar metrics : %s, Accumulated actual distance : %s, Accumulated predicted distance : %s" % (idx, cur_dsn, total_actual_distance, total_pred_distance))
+            dsns.extend(cur_dsn)
+        print "Average DSN for predicted route is : %s" % (sum(dsns)/ len(dsns))
+        with open ("dsn_result.json", "w") as fp:
+            json.dump(dsns,fp)

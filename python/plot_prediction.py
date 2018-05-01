@@ -79,7 +79,7 @@ def plot_mar_prediction(edge_index_to_tuples, node_locations, marginals, correct
     image = m.render()
     image.save(map_name)
 
-def plot_mpe_prediction(edge_index_to_tuples, node_location, mpe_result, used_edges, total_route, src_node, dst_node, map_name):
+def plot_mpe_prediction(edge_index_to_tuples, node_locations, mpe_result, used_edges, total_route, src_node, dst_node, map_name):
     m = StaticMap(2000, 1500, url_template="http://a.tile.osm.org/{z}/{x}/{y}.png")
     for used_edge in used_edges:
         src_gps = node_locations[edge_index_to_tuples[used_edge][0]]
@@ -95,7 +95,7 @@ def plot_mpe_prediction(edge_index_to_tuples, node_location, mpe_result, used_ed
             dst_gps = node_locations[edge_index_to_tuples[used_edge][1]]
             m.add_line(Line(((src_gps[1], src_gps[0]), (dst_gps[1], dst_gps[0])), "green", 10))
     for active_variable_index in mpe_result:
-        if active_variable_index in edge_index_to_tuples:
+        if active_variable_index in edge_index_to_tuples and active_variable_index not in used_edges:
             edge_tuple = edge_index_to_tuples[active_variable_index]
             src_gps = node_locations[edge_tuple[0]]
             dst_gps = node_locations[edge_tuple[1]]
