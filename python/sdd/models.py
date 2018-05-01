@@ -29,7 +29,8 @@ def models(node,vtree):
         elif sdd.sdd_vtree_of(node) == vtree:
             # enumerate prime/sub pairs
             elements = sdd.sdd_node_elements(node)
-            for prime,sub in _pairs(elements):
+            node_size = sdd.sdd_node_size(node)
+            for prime,sub in _pairs_new(elements, node_size):
                 if sdd.sdd_node_is_false(sub): continue
                 for left_model in models(prime,left_vtree):
                     for right_model in models(sub,right_vtree):
@@ -57,6 +58,11 @@ def _pairs(my_list):
     for x in it:
         y = it.next()
         yield (x,y)
+
+def _pairs_new(elements, node_size):
+    if elements is None: return
+    for i in range(0, node_size):
+        yield (sdd.sddNodeArray_getitem(elements, 2*i), sdd.sddNodeArray_getitem(elements, 2*i+1))
 
 def str_model(model,var_count=None):
     """Convert model to string."""

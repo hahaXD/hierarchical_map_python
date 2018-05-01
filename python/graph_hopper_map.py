@@ -108,7 +108,7 @@ def parse_graph(graph):
             nodes[y] = (lat,lon)
 
         if y < x: x,y = y,x
-        edges[edge_id] = (x,y,edge_name)
+        edges[edge_id] = Edge(x,y, edge_id)
         if edge_map.get(x) == None:
             edge_map[x] = [y]
         else:
@@ -276,15 +276,22 @@ class Cleaner:
         return fmatch
 
     # a projected match is list of edge,region pairs
-    def clean_matches(self,matches):
+    def clean_matches(self, matched_edges):
+        matches = [[p.as_tuple() for p in single_match] for single_match in matched_edges]
         clean_matches = []
         not_simple_count = 0
-        for match in matches:
-            match = self.filter_match(match) # remove redundant edges
-            if not self.is_simple_path(match):
+        for idx, match in enumerate(matches):
+            filtered_match = self.filter_match(match) # remove redundant edges
+            if not self.is_simple_path(filtered_match):
                 not_simple_count += 1
                 continue
-            clean_matches.append(match)
+            tuple_to_edge = {}
+            for jdx,e in enumerate(match):
+                tuple_to_edge[e] = matched_edges[idx][jdx]
+            cur_matched_edges = []
+            for e in filtered_match:
+                cur_matched_edges.append(tuple_to_edge[e])
+            clean_matches.append(cur_matched_edges)
         print "not-simple-path-count: %d/%d" % \
             (not_simple_count,len(matches))
         return clean_matches
@@ -308,15 +315,17 @@ def GenerateRoutesFromGps(graph, hopper, encoder, gps_filenames):
             saved_match = []
             for point in match:
                 edge = point.getEdgeState()
+                edge_id = edge.getEdge()
                 x,y = edge.getBaseNode(),edge.getAdjNode()
+                saved_match.append(Edge(x,y,edge_id))
+                """
                 if y < x: x,y = y,x
                 pair = (x,y)
-                """
                 used_nodes[x] += 1
                 used_nodes[y] += 1
                 used_edges[pair] += 1
-                """
                 saved_match.append(pair)
+                """
             saved_matches.append(saved_match)
     base_graph = graph.getBaseGraph()
     sgraph = simple_graph(base_graph)
@@ -365,9 +374,9 @@ if __name__ == '__main__':
         clusters = BinaryPartition(leaf_bound, nodes)
         binary_hierarchy = {}
         binary_hierarchy["node_size"] = len(nodes)
-        binary_hierarchy["edge_size"] = len(edges)
         binary_hierarchy["clusters"] = clusters
-        binary_hierarchy["edges"] = edges.values()
+        binary_hierarchy["edges"] = [i.as_json() for i in edges.values() if i.x != i.y]
+        binary_hierarchy["edge_size"] = len(binary_hierarchy["edges"])
         binary_hierarchy["nodes_location"] = []
         for i in range(len(nodes)):
             binary_hierarchy["nodes_location"].append(node_map[i])
@@ -381,4 +390,4 @@ if __name__ == '__main__':
             raise "need osm file to train gps route"
         used_edges = GenerateRoutesFromGps(graph, hopper, encoder, gps_routes_prefix)
         with open(used_edges_filename, "wb") as fp:
-            json.dump(used_edges, fp, indent=2)
+            json.dump([[p.as_json() for p in single_match] for single_match in used_edges], fp, indent=2)
