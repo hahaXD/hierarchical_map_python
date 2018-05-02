@@ -270,7 +270,6 @@ class HmCluster (object):
         universe = []
         node_pair_to_edges = {}
         for internal_edge in self.internal_edges:
-            assert (internal_edge.x, internal_edge.y) not in node_pair_to_edges
             if (internal_edge.x, internal_edge.y) not in node_pair_to_edges:
                 universe.append((internal_edge.x, internal_edge.y))
             node_pair_to_edges.setdefault((internal_edge.x, internal_edge.y), []).append(internal_edge)
