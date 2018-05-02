@@ -949,7 +949,7 @@ if __name__ == "__main__":
             total_accurate += cur_accurate
         print "Accurate prediction: %s, Total prediction: %s, Accuracy: %s" % (total_accurate, total_prediction, float(total_accurate)/total_prediction)
     if testing_routes is not None and options.mpe_test:
-        for idx, test_route = enumerate(testing_routes):
+        for idx, test_route in enumerate(testing_routes):
             step_by_step = False
             if options.mpe_step:
                 step_by_step = True
