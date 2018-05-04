@@ -1,7 +1,139 @@
 import math
+import re
+import logging
+
+class Edge(object):
+    def __init__(self,x,y,name=""):
+        if cmp(x,y) > 0: x,y = y,x
+        self.x = x
+        self.y = y
+        self.name = str(name)
+        self.nodes = set([x,y])
+
+    @staticmethod
+    def load_from_json(edge_json):
+        return Edge(edge_json["x"], edge_json["y"], str(edge_json["name"]))
+
+    @staticmethod
+    def load_from_str(edge_str):
+        assert edge_str[0] == "e"
+        p = re.match(r"e([^ ]*) \(([^\(\),]*),([^\(\),]*)\)", edge_str)
+        assert p.group(0) == edge_str
+        return Edge(int(p.group(2)), int(p.group(3)), p.group(1))
+
+    def other_end(self, input_end):
+        return self.OtherEnd(input_end)
+
+    def OtherEnd(self, input_end):
+        if self.x == input_end:
+            return self.y
+        else:
+            return self.x
+
+    def as_json(self):
+        return {"x": self.x, "y": self.y, "name": self.name}
+
+    def as_tuple(self):
+        return (self.x,self.y)
+
+    def __repr__(self):
+        return "e%s (%s,%s)" % (str(self.name),str(self.x),str(self.y))
+
+    def __cmp__(self,other):
+        return cmp(self.name,other.name)
+
+    def __eq__ (self, other):
+        return (self.x, self.y, self.name) == (other.x, other.y, other.name)
+
+    def __hash__(self):
+        return hash((self.x, self.y, self.name))
+
+
+# route edges are sequenced
+class Route:
+    def __init__(self, edges):
+        self.edges = edges
+
+    def get_route_between(self, src_node, dst_node):
+        node_to_edges = {}
+        for e in self.edges:
+            node_to_edges.setdefault(e.x, []).append(e)
+            node_to_edges.setdefault(e.y, []).append(e)
+        open_list = [(src_node, [])]
+        while len(open_list) > 0:
+            top_state = open_list[0]
+            frontier_node = top_state[0]
+            cur_path = top_state[1]
+            open_list = open_list[1:]
+            neighboring_edges = node_to_edges[top_state[0]]
+            for e in neighboring_edges:
+                if len(cur_path) != 0 and e == cur_path[-1]:
+                    continue
+                next_frontier = e.other_end(frontier_node)
+                open_list.append((next_frontier, cur_path+[e]))
+                if next_frontier == dst_node:
+                    return Route.get_route_from_edge_list(cur_path+[e])
+        return Route([])
+    @staticmethod
+    def get_route_from_edge_list (edge_list):
+        if len(edge_list) == 0:
+            return Route([])
+        logger = logging.getLogger()
+        logger.debug("Convert edges %s to route" % edge_list)
+        node_to_edges = {}
+        for edge in edge_list:
+            node_to_edges.setdefault(edge.x, []).append(edge)
+            node_to_edges.setdefault(edge.y, []).append(edge)
+        sequenced_edges = []
+        end_points = []
+        for node in node_to_edges:
+            if len(node_to_edges[node]) == 1:
+                end_points.append(node)
+        assert len(end_points) == 2
+        sequenced_edges.append(node_to_edges[end_points[0]][0])
+        cur_node = sequenced_edges[-1].other_end(end_points[0])
+        while len(node_to_edges[cur_node]) > 1:
+            assert node_to_edges[cur_node][0] == sequenced_edges[-1] or node_to_edges[cur_node][-1] == sequenced_edges[-1]
+            edge_to_add = node_to_edges[cur_node][0] if node_to_edges[cur_node][1] == sequenced_edges[-1] else node_to_edges[cur_node][1]
+            cur_node = edge_to_add.other_end(cur_node)
+            sequenced_edges.append(edge_to_add)
+        return Route(sequenced_edges)
+
+    def src_node (self):
+        if len(self.edges) == 0:
+            return None
+        if len(self.edges) == 1:
+            return self.edges[0].x
+        else:
+            p = self.edges[0].nodes.difference(self.edges[1].nodes)
+            return p.pop()
+
+    def dst_node (self):
+        if len(self.edges) == 0:
+            return None
+        if len(self.edges) == 1:
+            return self.edges[0].y
+        else:
+            p = self.edges[-1].nodes.difference(self.edges[-2].nodes)
+            return p.pop()
+
+    def node_sequence(self):
+        if len(self.edges) == 0:
+            return None
+        if len(self.edges) == 1:
+            return [self.edges[0].x, self.edges[0].y]
+        node_seq = []
+        node_seq.append(self.src_node())
+        for i in range(0, len(self.edges) -1):
+            p = self.edges[i].nodes.intersection(self.edges[i+1].nodes)
+            node_seq.append(p.pop())
+        node_seq.append(self.dst_node())
+        return node_seq
+
+    def as_json(self):
+        return [e.as_json() for e in self.edges]
 
 class SimpleGraph:
-
     def __init__(self,nodes,edges):
         self.nodes = nodes
         self.edges = edges

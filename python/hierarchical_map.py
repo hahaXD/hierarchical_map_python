@@ -6,36 +6,9 @@ import sdd.models
 import sdd.util
 import logging
 import itertools
-
-class Edge(object):
-    def __init__(self,x,y,name=""):
-        if cmp(x,y) > 0: x,y = y,x
-        self.x = x
-        self.y = y
-        self.name = name
-        self.nodes = set([x,y])
-    def OtherEnd(self, input_end):
-        if self.x == input_end:
-            return self.y
-        else:
-            return self.x
-    def global_id(self):
-        return "e%s" % self.name
-
-    def as_tuple(self):
-        return (self.x,self.y)
-
-    def __repr__(self):
-        return "%s (%s,%s)" % (self.global_id(),str(self.x),str(self.y))
-
-    def __cmp__(self,other):
-        return cmp(self.name,other.name)
-
-    def __eq__ (self, other):
-        return (self.x, self.y, self.name) == (other.x, other.y, other.name)
-
-    def __hash__(self):
-        return hash((self.x, self.y, self.name))
+import re
+import simple_graph
+Edge = simple_graph.Edge
 
 def generate_sdd_from_graphset(paths, sdd_manager, zdd_edge_to_sdd_edges):
     try:
@@ -125,12 +98,10 @@ class Graph(object):
     def __init__(self, edge_list):
         self.edge_list = edge_list
         self.node_to_edges = {}
-        for idx,cur_node_pair in enumerate(edge_list):
-            #Test
-            cur_edge = Edge(cur_node_pair[0], cur_node_pair[1], idx+1)
-#END Test
-            self.node_to_edges.setdefault(cur_node_pair[0], []).append(cur_edge)
-            self.node_to_edges.setdefault(cur_node_pair[1], []).append(cur_edge)
+        for idx, edge_json in enumerate(edge_list):
+            cur_edge = Edge.load_from_json(edge_json)
+            self.node_to_edges.setdefault(cur_edge.x, []).append(cur_edge)
+            self.node_to_edges.setdefault(cur_edge.y, []).append(cur_edge)
 
 class HmCluster (object):
     @staticmethod
@@ -276,16 +247,10 @@ class HmCluster (object):
         GraphSet.set_universe(universe)
         universe = GraphSet.universe()
         then_sdd_index = 0
-#### Test
-        sdd_index_to_edge = {}
-#### End Test
         for node_pair in universe:
             correponding_sdd_indexes = []
             for internal_edge in node_pair_to_edges[node_pair]:
                 then_sdd_index += 1
-#### Test
-                sdd_index_to_edge[then_sdd_index] = internal_edge
-#End Test
                 then_variable_mapping[str(internal_edge)] = then_sdd_index
                 correponding_sdd_indexes.append(then_sdd_index)
             zdd_to_sdd_index.append(correponding_sdd_indexes)
@@ -350,39 +315,6 @@ class HmCluster (object):
                 cur_case_then = generate_sdd_from_graphset(paths, then_manager, zdd_to_sdd_index)
             sdd.sdd_save("%s_%s" % (if_sdd_filename_prefix, case_index), cur_case_if)
             sdd.sdd_save("%s_%s" % (then_sdd_filename_prefix, case_index), cur_case_then)
-#### TEST
-            if self.name == "root11011":
-                with open ("edges.json", "r") as fp:
-                    candidates = json.load(fp)
-                for edge in entering_edges:
-                    if str(edge[0]) in candidates and str(edge[1]) in candidates:
-                        print "Found Case"
-                        for model in sdd.models.models(cur_case_then, sdd.sdd_manager_vtree(then_manager)):
-                            correct = True
-                            for idx in model:
-                                if model[idx]:
-                                    if str(sdd_index_to_edge[idx]) not in candidates:
-                                        correct = False
-                                        break
-                                else:
-                                    if str(sdd_index_to_edge[idx]) in candidates:
-                                        correct= False
-                                        break
-                            if correct :
-                                print "Problem!"
-                        for model in sdd.models.models(cur_case_then, sdd.sdd_manager_vtree(then_manager)):
-                            correct = True
-                            for internal_edge in self.internal_edges:
-                                if ((str(internal_edge) in candidates) and model[then_variable_mapping[str(internal_edge)]]) or ((str(internal_edge) not in candidates) and (not model[then_variable_mapping[str(internal_edge)]])):
-                                    continue
-                                else:
-                                    correct = False
-                                    break
-                            if correct:
-                                print "Problem"
-                        print ("%s_%s" % (if_sdd_filename_prefix, case_index))
-                        print ("%s_%s" % (then_sdd_filename_prefix, case_index))
-#### END TEST
             ifs.append("%s_%s" % (if_sdd_filename_prefix, case_index))
             thens.append("%s_%s" % (then_sdd_filename_prefix, case_index))
         sdd.sdd_vtree_save(if_vtree_filename, sdd.sdd_manager_vtree(if_manager))
@@ -555,6 +487,17 @@ class HmNetwork(object):
             leave_to_root_order.extend(leave_nodes)
         return leave_to_root_order
 
+    def GetRootCluster(self):
+        cluster_names = set(self.clusters.keys())
+        for cluster_name in self.clusters:
+            cur_cluster = self.clusters[cluster_name]
+            if cur_cluster.children is not None:
+                for child_name in cur_cluster.children:
+                    if child_name in cluster_names:
+                        cluster_names.remove(child_name)
+        assert len(cluster_names) == 1
+        return self.clusters[cluster_names.pop()]
+
     def write_hierarchy_to_dot(self, dot_filename):
         dot_file_content = "digraph g {\n"
         for cluster_name in self.clusters:
@@ -616,8 +559,8 @@ class HmNetwork(object):
         for idx, variable_name in enumerate(variables):
             index = idx + 1
             if variable_name[0] == "e":
-                str_pair = variable_name.split(" ")[1][1:-1].split(",")
-                edge_index_map[Edge(int(str_pair[0]), int(str_pair[1]))] = index
+                e = Edge.load_from_str(variable_name)
+                edge_index_map[e] = index
             else:
                 assert variable_name[0] == "c"
                 cluster_name = variable_name[1:]
