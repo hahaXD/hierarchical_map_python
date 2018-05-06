@@ -11,6 +11,13 @@ class Edge(object):
         self.nodes = set([x,y])
 
     @staticmethod
+    def from_json(dct):
+        if "__Edge__" in dct:
+            assert "x" in dct and "y" in dct and "name" in dct
+            return Edge.load_from_json(dct)
+        else:
+            return dct
+    @staticmethod
     def load_from_json(edge_json):
         return Edge(edge_json["x"], edge_json["y"], str(edge_json["name"]))
 
@@ -31,7 +38,7 @@ class Edge(object):
             return self.x
 
     def as_json(self):
-        return {"x": self.x, "y": self.y, "name": self.name}
+        return {"__Edge__": True, "x": self.x, "y": self.y, "name": self.name}
 
     def as_tuple(self):
         return (self.x,self.y)
@@ -131,7 +138,16 @@ class Route:
         return node_seq
 
     def as_json(self):
-        return [e.as_json() for e in self.edges]
+        return {"__Route__": True, "edges":[e.as_json() for e in self.edges]}
+
+    @staticmethod
+    def from_json(dct):
+        if "__Route__" in dct:
+            assert "edges" in dct and type(dct["edges"]) is list
+            edges = [Edge.from_json(e) for e in dct["edges"]]
+            assert all([type(e) is Edge for e in edges])
+            return Route.get_route_from_edge_list(edges)
+        return dct
 
 class SimpleGraph:
     def __init__(self,nodes,edges):

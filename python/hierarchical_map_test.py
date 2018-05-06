@@ -77,10 +77,6 @@ class MpeRoutePredictionMode(Enum):
     step_by_step = 2
     half_evidence = 3
 
-class DistanceMetric(Enum):
-    dsn = 1
-    hausdorff = 2
-    route_length = 3
 
 class MpeResult:
     def __init__(self, mpe_route = None, used_cluster = None):
@@ -110,7 +106,7 @@ class MpeResult:
                     if value > 0:
                         results.add(var_index)
         if results is None:
-            return None 
+            return None
         mpe_result = MpeResult([],None)
         used_edges = []
         for variable_index in results:
@@ -123,9 +119,17 @@ class MpeResult:
         if mpe_result.used_cluster is None:
             mpe_result.used_cluster = hm_network.GetRootCluster().name
         return mpe_result
-    
     def as_json(self):
-        return {"mpe_route" : [e.as_json() for e in self.mpe_route.edges], "top_cluster_name": self.used_cluster}
+        return {"__MpeResult__": True, "mpe_route" : [e.as_json() for e in self.mpe_route.edges], "top_cluster_name": self.used_cluster}
+    @staticmethod
+    def from_json(dct):
+        if "__MpeResult__" in dct:
+            assert "mpe_route" in dct
+            assert "top_cluster_name" in dct
+            top_cluster_name = dct["top_cluster_name"]
+            mpe_route = Route.from_json(dct)
+            return MpeResult(mpe_route, top_cluster_name)
+        return dct
 
 def GenerateTrainingDataset(hm_network, sbn_spec, training_routes):
     edge_index_map, cluster_index_map = hm_network.LoadVariableIndexesFromSbnSpec(sbn_spec)
@@ -171,21 +175,9 @@ def construct_cnf(src_edge_indexes, dst_edge_indexes, evid_edge_indexes, output_
         for clause in cnf:
             fp.write("%s 0\n" % (" ".join([str(a) for a in clause])))
 
-def route_length(route, node_locations):
-    route_length = sum([Haversine(node_locations[a.x], node_locations[a.y]).feet for a in route.edges])
-    return route_length
 
-# route1 - route2
-def get_distance_between_routes(route_1, route_2, node_locations, distance_metric):
-    if distance_metric is DistanceMetric.route_length:
-        result = {}
-        result["route_length"] = [route_length(route_1, node_locations), route_length(route_2, node_locations)]
-        result["distance"] = result["route_length"][0] - result["route_length"][1]
-        return result
-    else:
-        pass
 
-def mpe_prediction_per_route(test_route, edge_to_index, index_to_edge, node_to_edges, hm_network, sbn_spec, test_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size, running_mode, distance_metric, node_locations):
+def mpe_prediction_per_route(test_route, edge_to_index, index_to_edge, node_to_edges, hm_network, sbn_spec, test_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size, running_mode, node_locations):
     logger = logging.getLogger()
     if running_mode is MpeRoutePredictionMode.simple:
         cnf_filename = "%s_src_and_dst_evid.cnf" % (test_filename_prefix)
@@ -198,15 +190,12 @@ def mpe_prediction_per_route(test_route, edge_to_index, index_to_edge, node_to_e
         logger.debug("Running command : %s" % cmd)
         output = subprocess.check_output(shlex.split(cmd))
         mpe_result = MpeResult.GetMpeResultFromMpeOutput(output, hm_network, sbn_spec)
-        prediction_filename = "%s_src_and_dst_prediction_summary.json" % (test_filename_prefix)
-        prediction_summary = {"cmd": cmd, "mpe_result": mpe_result.as_json(), "evid_route":[], "actual_remaining": [e.as_json() for e in test_route.edges], "predicted_remaining": [e.as_json() for e in mpe_result.mpe_route.edges]}
-        with open(prediction_summary, "w") as fp:
-            json.dump(prediction_summary, fp)
+        prediction_summary = {"cmd": cmd, "mpe_result": mpe_result, "evid_route": Route([]), "actual_remaining": test_route, "predicted_remaining": mpe_result.mpe_route}
         plotter = OsmStaticMapPlotter()
         plotter.DrawRoute(test_route, node_locations, "green", 10)
         plotter.DrawRoute(mpe_result.mpe_route, "red", 5)
         plotter.SaveMap("%s_src_and_dst.png" % test_filename_prefix)
-        return get_distance_between_routes(mpe_result.mpe_route, test_route, node_locations, distance_metric)
+        return prediction_summary
     elif running_mode is MpeRoutePredictionMode.half_evidence:
         cnf_filename = "%s_half_trip_evid.cnf" % (test_filename_prefix)
         src_neighboring_edges = node_to_edges[test_route.src_node()]
@@ -245,212 +234,115 @@ def mpe_prediction_per_route(test_route, edge_to_index, index_to_edge, node_to_e
             mpe_result = MpeResult.GetMpeResultFromMpeOutput(output, hm_network, sbn_spec)
             assert mpe_result is not None
             predicted_remaining_route = mpe_result.mpe_route
-        prediction_summary = {"cmd": cmd, "mpe_result": mpe_result.as_json(), "evid_route":evidence_route.as_json(), "evid_after_retraction": [e.as_json() for e in evidence_edges], "actual_remaining": actual_remaining_route.as_json(), "predicted_remaining": predicted_remaining_route.as_json()}
-        with open("%s_half_trip_prediction_summary.json" % test_filename_prefix , "w") as fp:
-            json.dump(prediction_summary, fp)
+        prediction_summary = {"cmd": cmd, "mpe_result": mpe_result, "evid_route":evidence_route, "evid_after_retraction": Route(evidence_edges) , "actual_remaining": actual_remaining_route, "predicted_remaining": predicted_remaining_route}
         plotter = OsmStaticMapPlotter()
         plotter.DrawRoute(evidence_route, node_locations, "black", 5)
         plotter.DrawRoute(actual_remaining_route, node_locations, "green", 10)
         plotter.DrawRoute(predicted_remaining_route, node_locations, "red", 5)
         plotter.SaveMap("%s_half_trip.png" % test_filename_prefix)
-        return get_distance_between_routes(predicted_remaining_route, actual_remaining_route, node_locations, distance_metric)
+        return prediction_summary
     else:
         return None
 
-def RoutePredictionPerRoute(test_route, node_to_edge_indexes, edge_index_map, sdd_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size, running_mode, distance_metric, node_locations):
-    logger = logging.getLogger()
-    sequence_route = sequence_path(test_route)
-    used_edge_indexes = []
-    index_to_tuples = {}
-    edge_indexes_set = set()
-    for edge in edge_index_map:
-        index_to_tuples[edge_index_map[edge]] = edge 
-        edge_indexes_set.add(edge_index_map[edge])
-    for i in range(1, len(sequence_route)):
-        node_a = sequence_route[i-1]
-        node_b = sequence_route[i]
-        cur_edge_pair = (min(node_a, node_b), max(node_a, node_b))
-        used_edge_indexes.append(pair_to_index[cur_edge_pair])
-    logger.info("Testing route with node sequence : %s, indexes of used edges : %s" % (sequence_route, used_edge_indexes))
-    src_node = sequence_route[0]
-    dst_node = sequence_route[-1]
-    if running_mode is MpeRoutePredictionMode.simple:
-        cnf_filename = "%s_src_and_dst_evid.cnf" % (sdd_filename_prefix)
-        construct_cnf(node_to_edge_indexes[src_node], node_to_edge_indexes[dst_node], [], cnf_filename, variable_size)
-        cmd = "%s --mpe_query --cnf_evid %s %s %s" % (inference_binary, cnf_filename, learned_psdd_filename, learned_vtree_filename)
-        logger.debug("Running command : %s" % cmd)
-        output = subprocess.check_output(shlex.split(cmd))
-        mpe_result = ParseMpeOutput(output)
-        plot_filename = "%s_src_and_dst.png" % sdd_filename_prefix
-        plot_mpe_prediction(index_to_tuples, node_locations, mpe_result, [], used_edge_indexes, src_node, dst_node, plot_filename)
-        if distance_metric is DistanceMetric.dsn:
-            return [CalculateDSN(used_edge_indexes, mpe_result.intersection(edge_indexes_set))]
-        elif distance_metric is DistanceMetric.route_length:
-            return [CalculateRouteLengthDistance(mpe_result.intersection(edge_indexes_set), used_edge_indexes, index_to_tuples, node_locations)]
-        else:
-            assert distance_metric is DistanceMetric.hausdorff
-            return [CalculateHausdorffDistance(used_edge_indexes, mpe_result.intersection(edge_indexes_set), index_to_tuples, node_locations)]
-    elif running_mode is MpeRoutePredictionMode.step_by_step:
-        edges_evid = []
-        mpe_result = None
-        distances = []
-        for i in range(0, len(sequence_route)-1):
-            logger.info("Making prediction with used edges: %s" % edges_evid)
-            succeed = False
-            attempt_index = 0
-            while not succeed:
-                cnf_filename = "%s_%s_%s_evid.cnf" % (sdd_filename_prefix, i, attempt_index)
-                construct_cnf(node_to_edge_indexes[src_node], node_to_edge_indexes[dst_node], edges_evid, cnf_filename, variable_size)
-                cmd = "%s --mpe_query --cnf_evid %s %s %s" % (inference_binary, cnf_filename, learned_psdd_filename, learned_vtree_filename)
-                logger.debug("Running command : %s" % cmd)
-                output = subprocess.check_output(shlex.split(cmd))
-                mpe_result = ParseMpeOutput(output)
-                if mpe_result is None:
-                    edges_evid = edges_evid[1:]
-                    continue
-                else:
-                    succeed = True
-                    break
-            assert mpe_result is not None
-            #plot_filename = "%s_%s.png" % (sdd_filename_prefix, i)
-            #plot_mpe_prediction(index_to_tuples, node_locations, mpe_result, edges_evid, used_edge_indexes, src_node, dst_node, plot_filename)
-            edges_evid.append(used_edge_indexes[i])
-            previous_edges = set()
-            for j in range(0, i):
-                node_a = sequence_route[j]
-                node_b = sequence_route[j+1]
-                node_pair = (min(node_a, node_b), max(node_a, node_b))
-                previous_edges.add(pair_to_index[node_pair])
-            mpe_remaining_route = set()
-            actual_remaining_route = set()
-            for edge_index in mpe_result:
-                if edge_index in edge_indexes_set and edge_index not in previous_edges:
-                    mpe_remaining_route.add(edge_index)
-            for j in range(i,len(sequence_route)-1):
-                node_a = sequence_route[j]
-                node_b = sequence_route[j+1]
-                node_pair = (min(node_a, node_b), max(node_a, node_b))
-                actual_remaining_route.add(pair_to_index[node_pair])
-            connected_remaining_route = FindConnectedPath(mpe_remaining_route, sequence_route[i], index_to_tuples)
-            if len(connected_remaining_route) == 0 :
-                mpe_remaining_route = FindConnectedPath(mpe_remaining_route, sequence_route[-1], index_to_tuples)
-            else:
-                mpe_remaining_route = connected_remaining_route
-            if distance_metric is DistanceMetric.dsn:
-                distances.append(CalculateDSN(actual_remaining_route, mpe_remaining_route))
-            elif distance_metric is DistanceMetric.route_length:
-                distances.append(CalculateRouteLengthDistance(mpe_remaining_route, actual_remaining_route, index_to_tuples, node_locations))
-            else:
-                assert distance_metric is DistanceMetric.hausdorff
-                distances.append(CalculateHausdorffDistance(actual_remaining_route, mpe_remaining_route, index_to_tuples, node_locations))
-        return distances
-    else:
-        assert running_mode is MpeRoutePredictionMode.half_evidence
-        # generating evidence
-        edge_evidence = []
-        mid_point = len(sequence_route) / 2
-        for i in range(0, mid_point-1):
-            node_a = sequence_route[i]
-            node_b = sequence_route[i+1]
-            edge_pair = (min(node_a, node_b), max(node_a, node_b))
-            edge_index = pair_to_index[edge_pair]
-            edge_evidence.append(edge_index)
-        used_edges = list(edge_evidence)
-        logger.info("Making prediction with used edges: %s" % edge_evidence)
-        cnf_filename = "%s_half_evid.cnf" % (sdd_filename_prefix)
-        while True:
-            if len(edge_evidence) == 0 and mid_point > 1:
-                src_node = sequence_route[mid_point-1]
-            construct_cnf(node_to_edge_indexes[src_node], node_to_edge_indexes[dst_node], edge_evidence, cnf_filename, variable_size)
-            cmd = "%s --mpe_query --cnf_evid %s %s %s" % (inference_binary, cnf_filename, learned_psdd_filename, learned_vtree_filename)
-            logger.debug("Running command : %s" % cmd)
-            output = subprocess.check_output(shlex.split(cmd))
-            mpe_result = ParseMpeOutput(output)
-            if mpe_result is None:
-                edge_evidence = edge_evidence[1:]
-                continue
-            else:
-                break
-        plot_filename = "%s_half_evid.png" % sdd_filename_prefix
-        plot_mpe_prediction(index_to_tuples, node_locations, mpe_result, used_edges, used_edge_indexes, src_node, dst_node, plot_filename)
-        actual_remaining_edges = set(used_edge_indexes).difference(used_edges)
-        predicted_remaining_edges = FindPathBetween(mpe_result.intersection(edge_indexes_set), sequence_route[mid_point-1], sequence_route[-1], index_to_tuples)
-        if distance_metric is DistanceMetric.dsn:
-            return [CalculateDSN(actual_remaining_edges, predicted_remaining_edges)]
-        elif distance_metric is DistanceMetric.route_length:
-            return [CalculateRouteLengthDistance(predicted_remaining_edges, actual_remaining_edges, index_to_tuples, node_locations)], CalculateRouteDistance(predicted_remaining_edges, index_to_tuples, node_locations), CalculateRouteDistance(actual_remaining_edges, index_to_tuples, node_locations)
-        else:
-            assert distance_metric is DistanceMetric.hausdorff
-            return [CalculateHausdorffDistance(actual_remaining_edges, predicted_remaining_edges, index_to_tuples, node_locations)]
+class DistanceMetricsSummary:
+    @staticmethod
+    def from_mpe_prediction_summary(prediction_summary):
+        actual_routes = []
+        predicted_routes = []
+        for summary in prediction_summary:
+            actual_routes.append(summary["actual_remaining"])
+            predicted_routes.append(summary["predicted_remaining"])
+        return DistanceMetricsSummary(actual_routes, predicted_routes)
 
-def TestSingleRoute(test_route, node_to_edge_indexes, pair_to_index, sdd_filename_prefix, inference_binary, learned_psdd_filename, learned_vtree_filename, variable_size):
-    logger = logging.getLogger()
-    sequence_route = sequence_path(test_route)
-    used_edge_indexes = []
-    for i in range(1, len(sequence_route)):
-        node_a = sequence_route[i-1]
-        node_b = sequence_route[i]
-        cur_edge_pair = (min(node_a, node_b), max(node_a, node_b))
-        used_edge_indexes.append(pair_to_index[cur_edge_pair])
-    logger.info("Testing route with node sequence : %s, indexes of used edges : %s" % (sequence_route, used_edge_indexes))
-    src_node = sequence_route[0]
-    dst_node = sequence_route[-1]
-    edges_index = []
-    accurate = 0
-    total_pred = 0
-    for i in range(1, len(sequence_route)):
-        succeed = False
-        attempt_index = 0
-        while not succeed:
-            cnf_filename = "%s_%s_%s_evid.cnf" % (sdd_filename_prefix,i, attempt_index)
-            construct_cnf(node_to_edge_indexes[src_node], node_to_edge_indexes[dst_node], edges_index, cnf_filename, variable_size)
-            cmd = "%s --mar_query --cnf_evid %s %s %s" % (inference_binary, cnf_filename, learned_psdd_filename, learned_vtree_filename)
-            logger.debug("Running command : %s" % cmd)
-            output = subprocess.check_output(shlex.split(cmd))
-            lines = output.split("\n")
-            results = None
-            for line in lines:
-                if line.find("MAR result") != -1:
-                    results = {}
-                    raw_results = line.strip().split("=")[1].split(",")
-                    for tok in raw_results:
-                        if tok.strip() == "":
-                            continue
-                        var_index = int(tok.split(":")[0])
-                        neg_logpr = float(tok.split(":")[1].split("|")[0])
-                        pos_logpr = float(tok.split(":")[1].split("|")[1])
-                        results[var_index] = (neg_logpr, pos_logpr)
-                    logger.debug("Succeed in making prediction with evidence %s" % edges_index)
-                    succeed = True
-                if line.find("UNSATISFIED") != -1:
-                    logger.debug("Evidence %s does not satisfy hierarchical simple constraint" % edges_index)
-                    assert len(edges_index) > 0
-                    edges_index = edges_index[1:]
-            attempt_index += 1;
-        node_a = sequence_route[i-1]
-        node_b = sequence_route[i]
-        cur_edge_pair = (min(node_a, node_b), max(node_a, node_b))
-        assert results is not None
-        if i == 1:
-            candidate = list(node_to_edge_indexes[node_a])
-        else:
-            candidate = list(node_to_edge_indexes[node_a])
-            if len(edges_index) > 0:
-                candidate.remove(edges_index[-1])
-        edges_index.append(pair_to_index[cur_edge_pair])
-        candidate_weights = [results[i][1] for i in candidate]
-        if abs(sum([math.exp(i) for i in candidate_weights]) - 1)  >= 0.1:
-            logger.warning("Next route candidates' marginal added up to %s, which does not equal to 1" % sum([math.exp(i) for i in candidate_weights])) 
-        max_candidate_index = candidate_weights.index(max(candidate_weights))
-        pred = candidate[max_candidate_index]
-        if pred == edges_index[-1]:
-            accurate += 1
-        candidate_weight_map = {}
-        for idx, candidate_edge in enumerate(candidate):
-            candidate_weight_map[candidate_edge] = math.exp(candidate_weights[idx])
-        logging.info("Candidate distribution : %s. Prediction edge : %s. Actual used edge : %s." % (candidate_weight_map, pred, edges_index[-1])) 
-        total_pred +=1
-    return accurate, total_pred
+    def __init__(self, actual_routes, predicted_routes):
+        self.actual_routes = actual_routes
+        self.predicted_routes = predicted_routes
+
+    @staticmethod
+    def route_length(route, node_locations):
+        route_length = sum([Haversine(node_locations[a.x], node_locations[a.y]).feet for a in route.edges])
+        return route_length
+
+    def get_trip_length_distance(self, node_locations):
+        result = {}
+        result["number_of_routes"] = len(self.actual_routes)
+        actual_route_trip_length = [DistanceMetricsSummary.route_length(r, node_locations) for r in self.actual_routes]
+        predicted_route_trip_length = [DistanceMetricsSummary.route_length(r, node_locations) for r in self.predicted_routes]
+        result["actual_route_trip_length_sum"] = sum(actual_route_trip_length)
+        result["predicted_route_trip_length_sum"] = sum(predicted_route_trip_length)
+        result["total_percent_difference"] = (result["predicted_route_trip_length_sum"] - result["actual_route_trip_length_sum"])/ result["actual_route_trip_length_sum"]
+        percent_differences = [(predicted_route_trip_length[i] - actual_route_trip_length[i]) / actual_route_trip_length[i] for i in range(0, len(self.actual_routes))]
+        result["averaged_percent_difference"] = sum(percent_differences) / len(self.actual_routes)
+        result["averaged_distance"] = (result["predicted_route_trip_length_sum"] - result["actual_route_trip_length_sum"]) / len(self.actual_routes)
+        return result
+
+    @staticmethod
+    def hausdorff_distance_between(route_1, route_2, node_locations):
+        sequence_1 = route_1.node_sequence()
+        sequence_2 = route_2.node_sequence()
+        inf_distances = []
+        for node_1 in sequence_1:
+            inf_distances.append(min([Haversine(node_locations[node_1], node_locations[i]).feet for i in sequence_2]))
+        sup_1 = max(inf_distances)
+        inf_distances = []
+        for node_2 in sequence_2:
+            inf_distances.append(min([Haversine(node_locations[node_2], node_locations[i]).feet for i in sequence_1]))
+        sup_2 = max(inf_distances)
+        return max(sup_1, sup_2)
+
+    def get_hausdorff_distance(self, node_locations):
+        number_of_routes = len(self.actual_routes)
+        distances = []
+        actual_trip_lengths = []
+        for i in range(0, number_of_routes):
+            distances.append(DistanceMetricsSummary.hausdorff_distance_between(self.predicted_routes[i], self.actual_routes[i], node_locations))
+        for i in range(0, number_of_routes):
+            actual_trip_lengths.append(DistanceMetricsSummary.route_length(self.actual_routes[i], node_locations))
+        normalized_hausdorff_distances = [distances[i]/actual_trip_lengths[i] for i in range(0, number_of_routes)]
+        average_normalized_hausdorff_distance = sum(normalized_hausdorff_distances) / number_of_routes
+        result = {"number_of_routes": number_of_routes, "averaged_distance": sum(distances)/len(distances), "averaged_normalized_hausdorff_distance" : average_normalized_hausdorff_distance}
+        return result
+    @staticmethod
+    def dsn_between(route_1, route_2):
+        route_1_edges = set(route_1.edges)
+        route_2_edges = set(route_2.edges)
+        common = route_1_edges.intersection(route_2_edges)
+        mis_match = 0
+        for i in route_1_edges:
+            if i not in common:
+                mis_match += 1
+        for i in route_2_edges:
+            if i not in common:
+                mis_match += 1
+        total_len = len(route_1_edges) + len(route_2_edges)
+        return float(mis_match) / total_len
+
+    def get_dsn(self):
+        dsns = []
+        number_of_routes = len(self.actual_routes)
+        for i in range(0, number_of_routes):
+            cur_predicted_route = self.predicted_routes[i]
+            cur_actual_route = self.actual_routes[i]
+            dsns.append(DistanceMetricsSummary.dsn_between(cur_predicted_route, cur_actual_route))
+        result= {"number_of_routes": number_of_routes, "averaged_dsn" : sum(dsns)/number_of_routes}
+        return result
+
+class PredictionSummaryEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance (obj, Route):
+            return obj.as_json()
+        if isinstance (obj, Edge):
+            return obj.as_json()
+        if isinstance (obj, MpeResult):
+            return obj.as_json()
+        return json.JSONEncoder.default(self, obj)
+    @staticmethod
+    def from_json(dct):
+        if "__MpeResult__" in dct:
+            return MpeResult.from_json(dct)
+        if "__Route__" in dct:
+            return Route.from_json(dct)
+        return dct
 
 if __name__ == "__main__":
     usage = "usage: %prog [options] hierarchical_spec"
@@ -468,9 +360,7 @@ if __name__ == "__main__":
     parser.add_option("--mar_test", action="store_true", dest="mar_test")
     parser.add_option("--mpe_step", action="store_true", dest="mpe_step")
     parser.add_option("--mpe_half_evid", action="store_true", dest="mpe_half_evid")
-    parser.add_option("--dsn_distance", action="store_true", dest="dsn_distance")
-    parser.add_option("--hausdorff_distance", action="store_true", dest="hausdorff_distance")
-    parser.add_option("--route_length_distance", action="store_true", dest="route_length_distance")
+    parser.add_option("--prediction_summary_filename", action="store", dest="prediction_summary_filename")
     parser.add_option("--do_not_train", action="store_true", dest="do_not_train", default=False)
     (options,args) = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
@@ -558,6 +448,7 @@ if __name__ == "__main__":
     psdd_inference = "psdd_inference"
     if options.psdd_inference:
         psdd_inference = options.psdd_inference
+    prediction_summary = None
     if options.mpe_test and testing_routes:
         edge_index_map, cluster_index_map = network.LoadVariableIndexesFromSbnSpec(sbn_spec)
         variable_size = len(edge_index_map) + len(cluster_index_map)
@@ -572,20 +463,21 @@ if __name__ == "__main__":
             mpe_option = MpeRoutePredictionMode.step_by_step
         if options.mpe_half_evid:
             mpe_option = MpeRoutePredictionMode.half_evidence
-        distance_metric = DistanceMetric.dsn
-        if options.dsn_distance:
-            distance_metric = DistanceMetric.dsn
-        if options.hausdorff_distance:
-            distance_metric = DistanceMetric.hausdorff
-        if options.route_length_distance:
-            distance_metric = DistanceMetric.route_length
-        distances = []
+        prediction_summary = []
         for idx, test_route in enumerate(testing_routes):
-            result = mpe_prediction_per_route(test_route, edge_index_map, index_to_edge, node_to_edges, network, sbn_spec, "%s/%s"%(test_dir, idx), psdd_inference, psdd_filename, vtree_filename, variable_size, mpe_option, distance_metric, node_locations)
-            logger.info("Make prediction for %s th test route %s with accuracy result %s" % (idx, test_route.edges, result))
-            distances.append(result)
-        print "Averaged Distance %s " % (sum([a["distance"] for a in distances])/ len(distances))
-        if distance_metric is DistanceMetric.route_length:
-            print "Total actual route length %s, Total predicted route length %s" % (sum([a["route_length"][1] for a in distances]), sum([a["route_length"][0] for a in distances]))
-            difference_percent = [(a["route_length"][0]-a["route_length"][1])/a["route_length"][1] for a in distances]
-            print "Average percentage difference %s " % (sum(difference_percent)/len(difference_percent))
+            result = mpe_prediction_per_route(test_route, edge_index_map, index_to_edge, node_to_edges, network, sbn_spec, "%s/%s"%(test_dir, idx), psdd_inference, psdd_filename, vtree_filename, variable_size, mpe_option, node_locations)
+            logger.info("Make prediction for %s th test route %s with accuracy result %s" % (idx, test_route.edges, result["predicted_remaining"].edges))
+            prediction_summary.append(result)
+        with open ("%s/test_summary.json" % test_dir, "w") as fp:
+            json.dump(prediction_summary, fp, cls=PredictionSummaryEncoder)
+    if options.prediction_summary_filename:
+        with open(options.prediction_summary_filename, "r") as fp:
+            prediction_summary = json.load(fp, object_hook=PredictionSummaryEncoder.from_json)
+    if prediction_summary and len(prediction_summary) > 0:
+        distance_metric_summary =DistanceMetricsSummary.from_mpe_prediction_summary(prediction_summary)
+        print "Route length distance metric is :"
+        print distance_metric_summary.get_trip_length_distance(node_locations)
+        print "Hausdorff distance metric is :"
+        print distance_metric_summary.get_hausdorff_distance(node_locations)
+        print "DSN metric is :"
+        print distance_metric_summary.get_dsn()
