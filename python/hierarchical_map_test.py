@@ -138,6 +138,7 @@ def GenerateTrainingDataset(hm_network, sbn_spec, training_routes):
     data["variable_size"] = len(edge_index_map) + len(cluster_index_map)
     root_cluster = hm_network.GetRootCluster()
     data["data"] = []
+    num_routes_used_cluster_index = 0;
     for route in training_routes:
         used_index = []
         used_nodes = set()
@@ -146,6 +147,7 @@ def GenerateTrainingDataset(hm_network, sbn_spec, training_routes):
             used_nodes.add(edge.x)
             used_nodes.add(edge.y)
         cur_cluster = root_cluster
+        use_cluster_index = False
         while cur_cluster.children is not None:
             involved_child_clusters = []
             for child_name in cur_cluster.children:
@@ -153,11 +155,15 @@ def GenerateTrainingDataset(hm_network, sbn_spec, training_routes):
                 if len(child_cluster.nodes.intersection(used_nodes)) != 0:
                     involved_child_clusters.append(child_name)
             if len(involved_child_clusters) == 1:
+                use_cluster_index = True
                 used_index.append(cluster_index_map[involved_child_clusters[0]])
-                cur_cluster = child_cluster
+                cur_cluster = cur_cluster.children[involved_child_clusters[0]]
             else:
                 break
+        if use_cluster_index:
+            num_routes_used_cluster_index += 1
         data["data"].append(used_index)
+    print "routes used cluster index %s / %s" % (num_routes_used_cluster_index, len(training_routes))
     return data
 
 def construct_cnf(src_edge_indexes, dst_edge_indexes, evid_edge_indexes, output_filename, variable_size):
